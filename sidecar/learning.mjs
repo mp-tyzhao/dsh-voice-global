@@ -18,6 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { alignmentGaps, tokenize } from './dictionary.mjs';
+import { applyTerms } from './phonetic.mjs';
 
 /**
  * 候选词的置信度。
@@ -156,16 +157,40 @@ export function extractTerms(raw, corrected) {
     flush();
   }
 
-  // 3. 原文里已经有的词不算新术语；同一个词保留置信度最高的那条
+  // 3. 过滤 + 去重
   const rawLower = raw.toLowerCase();
   const best = new Map();
   for (const candidate of candidates) {
     const lower = candidate.term.toLowerCase();
     if (rawLower.includes(lower)) continue;
+    // 纯大小写差异不是识别错误（api → API），学它没有意义
+    if (rawLower.includes(lower) && candidate.term !== lower) continue;
+    // 纯数字/符号的变化属于"改事实"，不是术语
+    if (!/[\u4e00-\u9fffA-Za-z]/.test(candidate.term)) continue;
+    // 与原文只差大小写的整词（GitHub → github）同样跳过
+    if (rawLower.split(/[^a-z0-9]+/u).includes(lower)) continue;
     const existing = best.get(lower);
     if (!existing || candidate.confidence > existing.confidence) best.set(lower, candidate);
   }
   return [...best.values()];
+}
+
+/**
+ * 读用户认可过的历史文本，供反事实回放用。
+ * 优先用 corrected（用户明确改成的样子），否则用它当时收到的 text。
+ */
+export function loadAccepted(limit = 200) {
+  const path = process.env.VOICE_GLOBAL_CORPUS
+    || path.join(os.homedir(), '.voice-global', 'recordings', 'index.jsonl');
+  try {
+    return fs.readFileSync(path, 'utf8').split('\n')
+      .filter((line) => line.trim())
+      .slice(-limit)
+      .map((line) => { try { const e = JSON.parse(line); return e.corrected || e.text || ''; } catch { return ''; } })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 /** 只取词面，供调用方按老接口使用。 */
@@ -236,8 +261,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   if (argv.includes('--dry')) {
     process.stdout.write(`${JSON.stringify({ added: [], pending: [], candidates })}\n`);
   } else {
-    const { added, pending, promoted } = learn(dictPath, pendingPath, candidates);
-    process.stdout.write(`${JSON.stringify({ added, pending, promoted, candidates })}\n`);
+    const { added, pending, promoted, rejected } = learn(dictPath, pendingPath, candidates, loadAccepted());
+    process.stdout.write(`${JSON.stringify({ added, pending, promoted, rejected, candidates })}\n`);
   }
 }
 
@@ -252,7 +277,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
  * @param {{term: string, confidence: number, kind: string}[]} candidates
  * @returns {{added: string[], pending: string[], promoted: string[]}}
  */
-export function learn(dictionaryPath, pendingPath, candidates) {
+export function learn(dictionaryPath, pendingPath, candidates, acceptedTexts = []) {
   let pending = {};
   try {
     pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8'));
@@ -261,6 +286,7 @@ export function learn(dictionaryPath, pendingPath, candidates) {
   const added = [];
   const promoted = [];
   const stillPending = [];
+  const rejected = [];
   const toApply = [];
 
   for (const candidate of candidates) {
@@ -269,6 +295,12 @@ export function learn(dictionaryPath, pendingPath, candidates) {
     const confidence = candidate.confidence ?? 1;
 
     if (confidence >= AUTO_APPLY_CONFIDENCE) {
+      const radius = acceptedTexts.length ? blastRadius(term, acceptedTexts) : null;
+      if (radius && !radius.safe) {
+        // 影响面过大：这个词会到处命中，先别让它生效
+        rejected.push({ term, ratio: Number(radius.ratio.toFixed(2)), samples: radius.samples });
+        continue;
+      }
       toApply.push(term);
       continue;
     }
@@ -295,5 +327,36 @@ export function learn(dictionaryPath, pendingPath, candidates) {
     fs.writeFileSync(pendingPath, `${JSON.stringify(pending, null, 2)}\n`);
   } catch { /* 写不了就算了，不影响主流程 */ }
 
-  return { added, pending: stillPending, promoted };
+  return { added, pending: stillPending, promoted, rejected };
+}
+
+/**
+ * 反事实回放：把候选词拿到用户**已经认可过**的历史文本上跑一遍，看它会改动多少。
+ *
+ * 调研里给的做法是"只要会改动任何一条就不自动生效"。但对**用户词表**来说这个判据太严：
+ * 历史文本里本来就留着识别错的写法，把它改对恰恰是我们想要的。
+ *
+ * 真正的风险是另一种：词太宽泛，会命中**本来完全正确**的无关文本
+ * （比如一个两字词，拼音足够常见，到处都能匹配上）。
+ * 那种情况下影响面会明显偏高。所以这里看的是**比例**，不是有没有。
+ *
+ * @param {string} term
+ * @param {string[]} accepted - 用户认可过的文本（语料里的 corrected 或 text）
+ * @param {number} limit - 最高可接受的影响比例
+ * @returns {{ratio: number, samples: string[], safe: boolean}}
+ */
+export function blastRadius(term, accepted, limit = 0.2) {
+  const samples = [];
+  let changed = 0;
+  for (const text of accepted) {
+    if (!text) continue;
+    const result = applyTerms(text, [term]);
+    if (result.applied.length) {
+      changed += 1;
+      if (samples.length < 3) samples.push(result.applied[0].from);
+    }
+  }
+  const total = accepted.filter(Boolean).length;
+  const ratio = total ? changed / total : 0;
+  return { ratio, samples, safe: total === 0 || ratio <= limit };
 }

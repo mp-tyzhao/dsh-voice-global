@@ -26,6 +26,10 @@ final class EditWatcher {
     /// 观测窗口。太短会漏掉"想一会儿再改"，太长会白轮询。
     private static let watchSeconds: TimeInterval = 25
     private static let pollInterval: TimeInterval = 1.2
+    /// 输入框内容超过这个长度就不观测。
+    /// 每 1.2 秒读一次全文、还要做一次前后缀比较，编辑器里开着几 MB 文档时
+    /// 这个开销不划算；而且那么长的文本里用户改了几个字，本来也不是听写纠正。
+    private static let maxWatchedCharacters = 20_000
 
     private var timer: Timer?
     private var element: AXUIElement?
@@ -55,6 +59,10 @@ final class EditWatcher {
               let text = EditWatcher.value(of: focused) else {
             // 目标 App 不暴露文本就读不到，正常情况，不当错误
             Log.shared.info("学习：当前输入框不提供文本，本次跳过")
+            return
+        }
+        guard text.count <= EditWatcher.maxWatchedCharacters else {
+            Log.shared.info("学习：输入框内容过长（\(text.count) 字），本次不观测")
             return
         }
 

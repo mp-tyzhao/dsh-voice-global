@@ -25,21 +25,46 @@
 import { pinyin } from 'pinyin-pro';
 
 /**
- * 模糊音：这些音在口语里极易混淆，算半个距离。
- * 表来自 CapsWriter-Offline 的实践，不是 IME 里的玄学。
+ * 模糊音表
+ * ========
+ *
+ * **只收有依据的。** 调研核实：中文模糊音没有一份来自真实语音识别数据的
+ * 混淆矩阵，流传的都是输入法功能菜单或手写模板。
+ *
+ * 唯一有出处的是 Rime 作者佛振的【朙月拼音】模糊音定製模板
+ * （gist.github.com/lotem/2320943，2012 创建、2026 仍在更新）——
+ * 而且作者自己写的是"樣例足夠了，其他請自己總結"，即它是模板不是标准。
+ *
+ * 所以这里只保留那份模板里明确写出的：
+ *   zh/ch/sh → z/c/s、n↔l、en/eng、in/ing
+ * 以及作者特别说明「寫法複雜一些，分情況討論」的 f↔h（只按具体音节对，不整体放开）。
+ *
+ * **没收进来的**（输入法里常见但查不到依据）：an/ang、ian/iang、uan/uang、
+ * ai/ei、o/uo、e/ie、p/b、t/d、k/g。
+ * 收进来会提高召回，但也会让"本来对的词"被改掉 —— 在这个功能里误伤比漏改严重。
+ * 等自己的改正日志攒够了，用真实数据来校准，而不是照抄传闻。
  */
-const FUZZY_PAIRS = [
-  ['an', 'ang'], ['en', 'eng'], ['in', 'ing'], ['ian', 'iang'], ['uan', 'uang'],
-  ['z', 'zh'], ['c', 'ch'], ['s', 'sh'], ['l', 'n'], ['f', 'h'],
-  ['ai', 'ei'], ['o', 'uo'], ['e', 'ie'], ['p', 'b'], ['t', 'd'], ['k', 'g'],
-  ['ong', 'on'], ['ui', 'uei'], ['iu', 'iou'],
+/** 声母层面易混（比的是 initial，不是整个音节） */
+const FUZZY_INITIAL_PAIRS = [
+  ['zh', 'z'], ['ch', 'c'], ['sh', 's'],   // 翘舌 ↔ 平舌
+  ['n', 'l'],
+  ['f', 'h'],                               // 只在音节对上时用，见下
+];
+/** 韵母层面易混 */
+const FUZZY_FINAL_PAIRS = [['en', 'eng'], ['in', 'ing']];
+/** f↔h 只在特定音节上成立：整体放开会造出非法音节（Rime 模板里特别注明） */
+const FUZZY_SYLLABLE_PAIRS = [
+  ['hu', 'fu'], ['hong', 'feng'], ['hui', 'fei'], ['hun', 'fen'], ['hua', 'fa'],
 ];
 
-const FUZZY = new Set();
-for (const [a, b] of FUZZY_PAIRS) {
-  FUZZY.add(`${a}|${b}`);
-  FUZZY.add(`${b}|${a}`);
+function toSet(pairs) {
+  const set = new Set();
+  for (const [a, b] of pairs) { set.add(`${a}|${b}`); set.add(`${b}|${a}`); }
+  return set;
 }
+const FUZZY_INITIAL = toSet(FUZZY_INITIAL_PAIRS);
+const FUZZY_FINAL = toSet(FUZZY_FINAL_PAIRS);
+const FUZZY_SYLLABLE = toSet(FUZZY_SYLLABLE_PAIRS);
 
 /** 把一个汉字拆成 (声母, 韵母, 声调)。非汉字返回 null。 */
 export function syllableOf(char) {
@@ -63,10 +88,14 @@ export function syllableDistance(a, b) {
   if (a.withTone === b.withTone) return 0;
   let cost = 0;
   if (a.bare !== b.bare) {
-    if (FUZZY.has(`${a.bare}|${b.bare}`)) cost += 0.5;
-    else if (a.initial === b.initial || a.final === b.final) cost += 0.7;
-    else if (FUZZY.has(`${a.final}|${b.final}`)) cost += 0.75;
-    else cost += 1;
+    if (FUZZY_SYLLABLE.has(`${a.bare}|${b.bare}`)) {
+      cost += 0.4;
+    } else {
+      const initialNear = a.initial === b.initial || FUZZY_INITIAL.has(`${a.initial}|${b.initial}`);
+      const finalNear = a.final === b.final || FUZZY_FINAL.has(`${a.final}|${b.final}`);
+      // 声母韵母都接近 → 很可能就是口语混淆；只沾一边 → 弱信号
+      cost += initialNear && finalNear ? 0.4 : (initialNear || finalNear ? 0.7 : 1);
+    }
   }
   if (a.tone !== b.tone) cost += 0.15;
   return Math.min(cost, 1);
