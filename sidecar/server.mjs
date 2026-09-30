@@ -305,33 +305,41 @@ async function handle({ wavPath, language = 'auto', cleanup = 'rules' }) {
   }
 
   if (cleanup !== 'off' && raw) {
+    const vocabulary = currentVocabulary();
+
+    // 拼音层最先跑：本地、确定性、零成本，把同音字改对（`奇迹创谈`→`奇绩创坛`）。
+    // 不放在 LLM 分支里 —— 它是本地纠正，rules 模式同样该生效；也不该因为
+    // 没配 LLM 就失效。
+    let base = raw;
+    let phoneticHits = [];
+    if (vocabulary.terms.length) {
+      const fixed = applyTerms(raw, vocabulary.terms);
+      if (fixed.applied.length) {
+        log(`拼音层纠正：${fixed.applied.map((a) => `${a.from}→${a.to}`).join('、')}`);
+        base = fixed.text;
+        phoneticHits = fixed.applied.map((a) => `phonetic:${a.to}`);
+      }
+    }
+
     // 规则层始终跑一遍：既是 llm 失败时的兜底，也用于对比诊断
     const t1 = performance.now();
-    const ruled = clean(raw, { spaceCJK: false });
+    const ruled = clean(base, { spaceCJK: false });
     rulesText = ruled.text;
     timings.cleanup = Math.round(performance.now() - t1);
     text = ruled.text;
     hits = ruled.hits;
+    if (base !== raw) hits = [...hits, ...phoneticHits];
 
     if (cleanup === 'llm' && LLM.baseURL && LLM.model && meaningful.length >= 4) {
       const t2 = performance.now();
-      const vocabulary = currentVocabulary();
       try {
-        // 拼音层先跑一遍：本地、确定性、零成本，把同音字改对（`奇迹创谈`→`奇绩创坛`）。
-        // 放在 LLM 之前，模型看到的就是更干净的输入。
-        const beforeLLM = vocabulary.terms.length ? applyTerms(raw, vocabulary.terms) : { text: raw, applied: [] };
-        if (beforeLLM.applied.length) {
-          log(`拼音层纠正：${beforeLLM.applied.map((a) => `${a.from}→${a.to}`).join('、')}`);
-          hits = [...hits, ...beforeLLM.applied.map((a) => `phonetic:${a.to}`)];
-        }
-
-        // 直接把原始转写交给模型：规则层删改过的文本会丢掉上下文
+        // 直接把（拼音层纠正过的）原始转写交给模型：规则层删改过的文本会丢掉上下文
         // （比如把"呃那个我们"里的"呃"留下、却让模型看不到原句结构）
         const refined = await polish({
           baseURL: LLM.baseURL,
           apiKey: LLM.apiKey,
           model: LLM.model,
-          text: beforeLLM.text,
+          text: base,
           vocabularyText: vocabulary.prompt,
           timeoutMs: LLM.timeoutMs,
           onUsage: (usage) => {

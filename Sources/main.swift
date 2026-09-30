@@ -37,6 +37,11 @@ final class VoiceController {
     private let sidecar = Sidecar()
     /// 观测用户对转写结果的手工修改（"越用越聪明"的信号源）
     private var editWatcher: EditWatcher?
+
+    /// 把一次（原文，改正后）交给学习模块。手工纠正和输入框观测都走这里。
+    func learn(raw: String, corrected: String, completion: @escaping ([String]) -> Void) {
+        sidecar.learn(raw: raw, corrected: corrected, config: config, completion: completion)
+    }
     private let hud = HUD()
     private var hotkey: HotkeyTap
     private var levelTimer: Timer?
@@ -467,6 +472,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         learnToggle.state = controller.config.learnFromEdits ? .on : .off
         learningMenu.addItem(learnToggle)
 
+        let correctItem = NSMenuItem(title: "纠正最近一次…", action: #selector(correctLast), keyEquivalent: "")
+        correctItem.target = self
+        learningMenu.addItem(correctItem)
+
         let dictItem = NSMenuItem(title: "打开我的词表…", action: #selector(openDictionary), keyEquivalent: "")
         dictItem.target = self
         learningMenu.addItem(dictItem)
@@ -515,6 +524,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// 打开用户词表。文件不存在就先建一份带说明的空表，免得用户开出来一个空白。
+    /// 纠正最近一次听写。
+    ///
+    /// 这是学习闭环的**兜底入口**：自动观测输入框（EditWatcher）在有些 App 上读不到文本，
+    /// 但用户永远可以在这里手改一次 —— 改完立刻学到词，而且顺带把正确答案写进语料。
+    @objc private func correctLast() {
+        guard let last = Recordings.lastTranscript() else {
+            showAlert(title: "还没有可纠正的记录", body: "先说一句，然后回到这里改。")
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "纠正最近一次听写"
+        alert.informativeText = """
+        下面是识别结果，改成你实际说的样子。
+        我会从中提取你的专有名词，下次就认得它们了。
+
+        原文：\(last.raw)
+        """
+        alert.addButton(withTitle: "记下来")
+        alert.addButton(withTitle: "取消")
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 460, height: 110))
+        let editor = NSTextView(frame: scroll.bounds)
+        editor.string = last.text
+        editor.font = .systemFont(ofSize: 13)
+        editor.isRichText = false
+        editor.autoresizingMask = [.width]
+        scroll.documentView = editor
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        alert.accessoryView = scroll
+
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.initialFirstResponder = editor
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let corrected = editor.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !corrected.isEmpty, corrected != last.text else {
+            Log.shared.info("纠正：没有改动，跳过")
+            return
+        }
+
+        // 1. 写回语料当标注（评测与回归都靠它）
+        Recordings.applyCorrection(ts: last.ts, corrected: corrected)
+
+        // 2. 学习：用 raw 对照 corrected，抽出用户真正用的词
+        controller?.learn(raw: last.raw, corrected: corrected) { [weak self] added in
+            guard let self else { return }
+            if added.isEmpty {
+                self.showAlert(title: "记下了", body: "这次没有提取到新的专有名词（改动可能只是措辞或标点）。")
+            } else {
+                self.showAlert(title: "学到 \(added.count) 个词", body: added.joined(separator: "、"))
+            }
+            Log.shared.info("手工纠正学习：\(added.joined(separator: "、"))")
+        }
+    }
+
     @objc private func openDictionary() {
         let path = Paths.dictionary
         if !FileManager.default.fileExists(atPath: path.path) {
