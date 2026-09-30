@@ -23,13 +23,14 @@
  *   VOICE_GLOBAL_LLM_BASE / VOICE_GLOBAL_LLM_KEY / VOICE_GLOBAL_LLM_MODEL   LLM 润色端点
  *   VOICE_GLOBAL_LLM_TIMEOUT_MS
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { clean } from './cleanup.mjs';
+import { clean, trimEndPunctuation } from './cleanup.mjs';
 import { polish, isPlausible } from './llm.mjs';
+import { loadTerms, renderVocabularyPrompt, stripFabricatedTerms } from './dictionary.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -39,6 +40,31 @@ const MODEL = process.env.VOICE_GLOBAL_MODEL || join(MODEL_ROOT, 'sensevoice-onn
 const TOKENS = process.env.VOICE_GLOBAL_TOKENS || join(MODEL_ROOT, 'sensevoice-onnx', 'tokens.txt');
 const VAD = process.env.VOICE_GLOBAL_VAD || join(MODEL_ROOT, 'silero', 'silero_vad.onnx');
 const THREADS = Number(process.env.VOICE_GLOBAL_THREADS || 2);
+/** 末尾不留标点。听写多是「半句话」，自动补上的句号反而要手动删。设 0 可关掉。 */
+const TRIM_END_PUNCT = (process.env.VOICE_GLOBAL_TRIM_END_PUNCT ?? '1') !== '0';
+
+/**
+ * 用户词表：`~/.voice-global/dictionary.json`。
+ * 每次请求按 mtime 判断要不要重读，所以用户（或学习模块）改完立刻生效，
+ * 不需要重启 sidecar。读不到就是空表，功能降级但不影响听写。
+ */
+const DICTIONARY_PATH = process.env.VOICE_GLOBAL_DICTIONARY
+  || join(homedir(), '.voice-global', 'dictionary.json');
+let termsCache = { mtimeMs: -1, terms: [], prompt: '' };
+
+function currentVocabulary() {
+  try {
+    const stat = statSync(DICTIONARY_PATH);
+    if (stat.mtimeMs !== termsCache.mtimeMs) {
+      const terms = loadTerms(DICTIONARY_PATH);
+      termsCache = { mtimeMs: stat.mtimeMs, terms, prompt: renderVocabularyPrompt(terms) };
+      if (terms.length) log(`词表已加载：${terms.length} 条`);
+    }
+  } catch {
+    if (termsCache.mtimeMs !== -1) termsCache = { mtimeMs: -1, terms: [], prompt: '' };
+  }
+  return termsCache;
+}
 
 const LLM = {
   baseURL: process.env.VOICE_GLOBAL_LLM_BASE || '',
@@ -207,6 +233,7 @@ async function handle({ wavPath, language = 'auto', cleanup = 'rules' }) {
 
     if (cleanup === 'llm' && LLM.baseURL && LLM.model && meaningful.length >= 4) {
       const t2 = performance.now();
+      const vocabulary = currentVocabulary();
       try {
         // 直接把原始转写交给模型：规则层删改过的文本会丢掉上下文
         // （比如把"呃那个我们"里的"呃"留下、却让模型看不到原句结构）
@@ -215,6 +242,7 @@ async function handle({ wavPath, language = 'auto', cleanup = 'rules' }) {
           apiKey: LLM.apiKey,
           model: LLM.model,
           text: raw,
+          vocabularyText: vocabulary.prompt,
           timeoutMs: LLM.timeoutMs,
           onUsage: (usage) => {
             // 记到日志里，方便随时核算成本
@@ -230,6 +258,17 @@ async function handle({ wavPath, language = 'auto', cleanup = 'rules' }) {
         if (isPlausible(raw, refined)) {
           text = refined;
           hits = [...hits, 'llm'];
+
+          // 确定性校验：词表能把 mve 还原成 Milvus，但模型有时会从词表里
+          // 挑一个词凭空插进去（实测，且 prompt 里明文禁止也拦不住）。
+          // 这里按"这一段原文有没有被换掉的东西"判定，把编造的词撤掉。
+          const guarded = stripFabricatedTerms(raw, text, vocabulary.terms);
+          if (guarded.removed.length) {
+            log(`撤销凭空插入的词表词：${guarded.removed.join('、')}`);
+            // 重建文本会丢标点，跑一次规则层补回来
+            text = clean(guarded.text, { spaceCJK: false }).text;
+            hits = [...hits, ...guarded.removed.map((term) => `fabricated:${term}`)];
+          }
         } else {
           polishError = 'llm 结果偏离原文，已退回规则清理';
         }
@@ -237,6 +276,16 @@ async function handle({ wavPath, language = 'auto', cleanup = 'rules' }) {
         timings.llm = Math.round(performance.now() - t2);
         polishError = String(error?.message ?? error);
       }
+    }
+  }
+
+  // 末尾标点统一在这里剥：不管走规则层还是 LLM 层、也不管 LLM 是不是自己补了句号，
+  // 都要在最后过一道，否则 LLM 补的句号会漏网。
+  if (TRIM_END_PUNCT) {
+    const trimmed = trimEndPunctuation(text);
+    if (trimmed !== text) {
+      text = trimmed;
+      if (rulesText) rulesText = trimEndPunctuation(rulesText);
     }
   }
 

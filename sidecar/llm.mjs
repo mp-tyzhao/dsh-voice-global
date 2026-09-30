@@ -35,11 +35,12 @@ const SYSTEM_PROMPT = [
  * @param {string} options.apiKey
  * @param {string} options.model
  * @param {string} options.text - 待清理文本
+ * @param {string} [options.vocabularyText] - 追加到 system prompt 的用户词表段落
  * @param {number} [options.timeoutMs]
  * @param {(usage: object) => void} [options.onUsage] - 回调 token 用量，便于统计成本
  * @returns {Promise<string>} 清理后的文本；调用方负责捕获异常
  */
-export async function polish({ baseURL, apiKey, model, text, timeoutMs = DEFAULT_TIMEOUT_MS, onUsage }) {
+export async function polish({ baseURL, apiKey, model, text, vocabularyText = '', timeoutMs = DEFAULT_TIMEOUT_MS, onUsage }) {
   if (!baseURL || !model) throw new Error('llm: baseURL 与 model 必填');
   const url = `${baseURL.replace(/\/+$/u, '')}/chat/completions`;
   const controller = new AbortController();
@@ -59,7 +60,7 @@ export async function polish({ baseURL, apiKey, model, text, timeoutMs = DEFAULT
         // 不需要推理链：关掉后输出从数百 token 降到几十，延迟从 ~1.5s 降到 ~0.5s。
         thinking: { type: 'disabled' },
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: SYSTEM_PROMPT + vocabularyText },
           { role: 'user', content: text },
         ],
       }),

@@ -108,6 +108,10 @@ struct VoiceConfig: Codable {
     /// 空闲多久后卸载识别模型（秒）。模型常驻约 900MB，重载只要 0.4 秒，所以默认 5 分钟就释放。
     var idleUnloadSeconds = 300
 
+    /// 去掉整段末尾的标点。听写多是"半句话"，自动补上的句号反而要手动删。
+    /// 只剥末尾，中间的断句标点全部保留。注意 `？` 也在剥离范围内。
+    var trimEndPunctuation = true
+
     // MARK: - 开发模式（特别版）
 
     /// sidecar 源码目录（仓库根路径）。填了就不再用 app 包内的那份拷贝，
@@ -149,7 +153,7 @@ struct VoiceConfig: Codable {
         case language, cleanup, tapMaxSeconds, nodePath, modelRoot, threads
         case modelPath, tokensPath, vadPath
         case restoreClipboard, pasteDelayMs, restoreDelayMs, showHUD, playSounds, llm
-        case idleUnloadSeconds
+        case idleUnloadSeconds, trimEndPunctuation
         case devSidecarRoot, devAutoReload
         case keepRecordings, recordingsMaxCount, recordingsMaxMB, recordingsMaxDays
     }
@@ -171,6 +175,7 @@ struct VoiceConfig: Codable {
         showHUD = c.fallback(.showHUD, true)
         playSounds = c.fallback(.playSounds, true)
         idleUnloadSeconds = c.fallback(.idleUnloadSeconds, 300)
+        trimEndPunctuation = c.fallback(.trimEndPunctuation, true)
         devSidecarRoot = c.fallback(.devSidecarRoot, "")
         devAutoReload = c.fallback(.devAutoReload, true)
         keepRecordings = c.fallback(.keepRecordings, false)
@@ -197,6 +202,7 @@ struct VoiceConfig: Codable {
         try c.encode(showHUD, forKey: .showHUD)
         try c.encode(playSounds, forKey: .playSounds)
         try c.encode(idleUnloadSeconds, forKey: .idleUnloadSeconds)
+        try c.encode(trimEndPunctuation, forKey: .trimEndPunctuation)
         try c.encode(devSidecarRoot, forKey: .devSidecarRoot)
         try c.encode(devAutoReload, forKey: .devAutoReload)
         try c.encode(keepRecordings, forKey: .keepRecordings)

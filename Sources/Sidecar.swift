@@ -72,6 +72,7 @@ final class Sidecar {
                 var environment = ProcessInfo.processInfo.environment
                 environment["VOICE_GLOBAL_MODEL_ROOT"] = modelRoot
                 environment["VOICE_GLOBAL_THREADS"] = String(config.threads)
+                environment["VOICE_GLOBAL_TRIM_END_PUNCT"] = config.trimEndPunctuation ? "1" : "0"
                 // 允许直接指定单个文件，便于换精度（int8/fp32）或换一套自训练权重
                 if !config.modelPath.isEmpty { environment["VOICE_GLOBAL_MODEL"] = config.modelPath }
                 if !config.tokensPath.isEmpty { environment["VOICE_GLOBAL_TOKENS"] = config.tokensPath }

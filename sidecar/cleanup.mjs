@@ -205,6 +205,26 @@ function normalizePunctuation(text) {
 }
 
 /**
+ * 去掉整段末尾的标点。
+ *
+ * 听写出来的常常是"半句话"——说完接着手打，末尾自动补的句号反而要手动删掉。
+ * 所以默认不在结尾留标点：**只剥末尾**，中间的断句标点全部保留。
+ *
+ * 注意 `？` 也在剥离范围内：`你明天来吗？` → `你明天来吗`。
+ * 中文里"吗/呢"已经承载疑问语气；英文问句会损失语气，
+ * 介意的话把配置里的 `trimEndPunctuation` 关掉。
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function trimEndPunctuation(text) {
+  return String(text ?? '')
+    .replace(/[\s\u3000]+$/u, '')
+    .replace(/[。．.！!？?…；;，,、：:]+$/u, '')
+    .replace(/[\s\u3000]+$/u, '');
+}
+
+/**
  * 中英文之间补空格（可选，默认关闭：聊天场景常常不需要）。
  * @param {string} text
  * @returns {{text: string, hits: string[]}}

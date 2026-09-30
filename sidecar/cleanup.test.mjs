@@ -3,7 +3,7 @@
  *
  * 覆盖：语气词删除、重复合并、口头自我修正、标点规整、幂等性、误删防护。
  */
-import { clean } from './cleanup.mjs';
+import { clean, trimEndPunctuation } from './cleanup.mjs';
 
 const cases = [
   // [输入, 期望输出, 说明]
@@ -59,5 +59,28 @@ const emptyOk = empty.text === '' && empty.changed === false;
 if (!emptyOk) failed++;
 console.log(`${emptyOk ? 'PASS' : 'FAIL'}  空输入`);
 
-console.log(`\n${failed === 0 ? 'ALL PASS' : `${failed} FAILED`} (${cases.length + idempotentSources.length + 1} 项)`);
+// 末尾标点：听写多是「半句话」，末尾不留标点，中间的断句标点保留
+const trimCases = [
+  ['我们明天下午3点开会。', '我们明天下午3点开会'],
+  ['你明天有空吗？', '你明天有空吗'],
+  ['Are you free tomorrow?', 'Are you free tomorrow'],
+  ['第一句。第二句。', '第一句。第二句'],
+  ['好，我知道了！', '好，我知道了'],
+  ['真的吗？！', '真的吗'],
+  ['末尾有空格 。  ', '末尾有空格'],
+  ['没有标点', '没有标点'],
+  ['', ''],
+  ['。。。', ''],
+  ['中间。标点。保留。', '中间。标点。保留'],
+];
+let trimFailed = 0;
+for (const [input, expected] of trimCases) {
+  const got = trimEndPunctuation(input);
+  const ok = got === expected;
+  if (!ok) { failed++; trimFailed++; }
+  console.log(`${ok ? 'PASS' : 'FAIL'}  末尾标点: ${JSON.stringify(input)} → ${JSON.stringify(got)}`);
+}
+
+
+console.log(`\n${failed === 0 ? 'ALL PASS' : `${failed} FAILED`} (${cases.length + idempotentSources.length + 1 + trimCases.length} 项)`);
 process.exit(failed === 0 ? 0 : 1);
