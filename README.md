@@ -316,6 +316,48 @@ node bench/accuracy.mjs --rerun --no-dict       # 关掉词表做对照
 > 同一配置连跑三次的波动约 1.1 个百分点，所以 `--repeat 3` 是必要的 ——
 > 比噪声小的差异不要下结论（我们就在这上面栽过一次：把噪声读成了"增益有害"）。
 
+### 换成别的语音模型
+
+模型不是写死在代码里的。每个模型目录放一个 `profile.json` 描述它是什么类型，
+程序按类型构造配置。
+
+```bash
+node sidecar/server.mjs --list-profiles        # 看有哪些可选
+node scripts/configure.mjs --model-dir whisper-small   # 切过去
+```
+
+支持的类型：`senseVoice` / `whisper` / `paraformer` / `transducer` /
+`zipformer` / `nemoCtc` / `wenetCtc`。**没有 `profile.json` 就按 SenseVoice 处理** ——
+所以已有安装不受影响。
+
+两个刻意的设计：
+
+- **不认识的类型直接报错**，不静默降级。否则你以为换了模型，其实还在用老的。
+- **配了热词但解码方法是贪心时，自动改成 `modified_beam_search`** ——
+  transducer 只有配它才吃热词。这类"配了没效果"最难查。
+
+#### 实测：SenseVoice 比 Whisper 更适合中文听写
+
+20 条真实录音、同一套流水线：
+
+| 模型 | ASR 原始 CER | 最终输出 CER | 延迟 |
+| --- | --- | --- | --- |
+| **SenseVoice-Small int8** | **21.6%** | **9.9%** | ~130ms |
+| Whisper-Small int8 | 33.0% | 29.0% | ~1068ms |
+
+不是简单的好坏，是**错法不同**：Whisper 认对了 `typeless`，却把「我们」听成
+「你们」、「专有术语」听成「的数是」；SenseVoice 正好反过来。
+但在这个场景（中文为主、夹英文术语）下 SenseVoice 明显更合适，还快 8 倍。
+
+复现：
+
+```bash
+node bench/accuracy.mjs --rerun --model-dir ~/.voice-global/models/whisper-small
+```
+
+> 20 条样本是判断模型差异的最低要求。8 条时测量噪声约 1.1 个点，
+> 比它小的差异读不出来 —— 我们在这上面栽过一次，把噪声当成了结论。
+
 ### 音量自适应
 
 不同电脑、麦克风、环境、说话音量，录进来的电平能差 30dB 以上。
