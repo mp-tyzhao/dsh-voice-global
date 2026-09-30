@@ -49,6 +49,12 @@ final class EditWatcher {
     var onLearned: (([String], [String]) -> Void)?
     /// 自测时打开，把每次轮询的判断都写进日志
     var verbose = false
+    /// 观测代次。每次 start/stop 都自增，用来作废还没跑完的 settle 重试。
+    ///
+    /// 为什么需要：settle 靠 asyncAfter 重试，最多等 1.8 秒。如果两次听写
+    /// 间隔很短，上一次的 settle 回调还会继续跑 —— 它会拿**旧的 pasted**
+    /// 去配**新的输入框内容**，算出一个错误的差异交给学习，等于学到垃圾。
+    private var generation = 0
     /// 用户把整段转写改成了什么样 —— 写回语料当标注
     var onCorrection: ((String) -> Void)?
 
@@ -80,11 +86,13 @@ final class EditWatcher {
         // 往往还没处理完，读到的还是旧值。实测日志里 13 次观测有 11 次读到
         // 0 或 1 字 —— 拿这个当基线的话，后面每一轮都判不出"还是同一段文本"，
         // 观测等于白开，学习闭环一次都不会触发。这就是那个根因。
-        settle(initial: text, attempt: 0)
+        generation += 1
+        settle(initial: text, attempt: 0, generation: generation)
     }
 
     /// 轮询等待粘贴落地（文本变得和刚读完时不一样），最多等约 1.8 秒。
-    private func settle(initial: String, attempt: Int) {
+    private func settle(initial: String, attempt: Int, generation: Int) {
+        guard generation == self.generation else { return }   // 已被新的观测取代
         guard attempt < 12 else {
             Log.shared.info("学习：粘贴后输入框始终没有变化，本次不观测")
             stop()
@@ -106,7 +114,7 @@ final class EditWatcher {
         let landed = (!text.isEmpty && text != initial) || text.contains(pasted)
         guard landed else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                self?.settle(initial: initial, attempt: attempt + 1)
+                self?.settle(initial: initial, attempt: attempt + 1, generation: generation)
             }
             return
         }
@@ -128,10 +136,16 @@ final class EditWatcher {
     }
 
     func stop() {
+        generation += 1          // 作废所有在途的 settle 重试
         timer?.invalidate()
         timer = nil
         element = nil
         before = ""
+        // 这里**不能**清 pasted / raw：
+        // poll() 的流程是 stop() 之后才调 handleChange，而 handleChange 要用
+        // self.pasted 去找"我们粘的那段"。清掉它，每一轮改正都会在第一关被丢掉
+        // —— 和之前那个 stop() 清空 before 的 bug 是同一类错误。
+        // 反正下次 start() 会覆盖它们，没有清的必要。
     }
 
     // MARK: - 轮询
