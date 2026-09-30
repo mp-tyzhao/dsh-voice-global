@@ -305,9 +305,23 @@ ASR 输出
 
 ### 改完怎么知道有没有变准
 
+四层验证，从快到慢：
+
+```bash
+node sidecar/phonetic.test.mjs        # 单模块逻辑（秒级）
+./scripts/selftest.sh                 # 学习闭环端到端（造受控输入框，真跑一遍）
+./scripts/soak.sh                     # 稳定性：全语料连续跑，看有没有崩/变慢
+node bench/accuracy.mjs --rerun       # 准确率：算真实 CER
+```
+
+前三个加起来不到一分钟，改完随手跑一遍。
+
+#### 准确率
+
 ```bash
 node bench/accuracy.mjs --rerun --repeat 3      # 用真实录音算 CER
 node bench/accuracy.mjs --rerun --no-dict       # 关掉词表做对照
+node bench/accuracy.mjs --rerun --model-dir <路径>   # 换模型对比
 ```
 
 正确答案来自两处：用户手改后自动写入的 `corrected` 字段，以及手工标注的
