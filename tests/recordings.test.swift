@@ -36,7 +36,7 @@ struct RecordingsTest {
     static func archive(_ label: String, config: VoiceConfig, seconds: Double = 1.0) {
         let temp = Paths.tmp.appendingPathComponent("\(label).wav")
         try? makeWav(samples: Int(seconds * 16000)).write(to: temp)
-        Recordings.archive(
+        Recordings.record(
             wav: temp, seconds: seconds,
             raw: "原始 \(label)", text: "结果 \(label)", hits: ["llm"],
             timings: ["asr": 100, "total": 200], config: config
@@ -45,7 +45,7 @@ struct RecordingsTest {
 
     static func main() {
         var config = VoiceConfig()
-        config.keepRecordings = true
+        config.keepRecordings = true   // 归档要能搬音频
 
         // 1. 归档
         archive("a", config: config)
@@ -95,6 +95,21 @@ struct RecordingsTest {
         Recordings.clearAll()
         check("清空后 index.jsonl 不存在", !FileManager.default.fileExists(atPath: Recordings.indexFile.path))
         check("清空后统计归零", Recordings.statistics().count == 0)
+
+
+        // 7. 音频关掉时：只记文本，且 prune 不能把它当坏行删掉
+        var textOnly = VoiceConfig()
+        textOnly.keepRecordings = false
+        archive("d", config: textOnly)
+        archive("e", config: textOnly)
+        let afterTextOnly = ((try? String(contentsOf: Recordings.indexFile, encoding: .utf8)) ?? "")
+            .split(separator: "\n", omittingEmptySubsequences: true).count
+        check("关掉音频后文本仍然记录（实际 \(afterTextOnly) 条）", afterTextOnly == 2)
+        textOnly.recordingsMaxCount = 1
+        Recordings.prune(config: textOnly)
+        let prunedTextOnly = ((try? String(contentsOf: Recordings.indexFile, encoding: .utf8)) ?? "")
+            .split(separator: "\n", omittingEmptySubsequences: true).count
+        check("只记文本的条目不会被 prune 当坏行丢掉（实际 \(prunedTextOnly) 条）", prunedTextOnly == 1)
 
         print()
         if failures == 0 {

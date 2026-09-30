@@ -35,6 +35,8 @@ final class VoiceController {
     private(set) var config: VoiceConfig
     private let recorder = Recorder()
     private let sidecar = Sidecar()
+    /// 观测用户对转写结果的手工修改（"越用越聪明"的信号源）
+    private var editWatcher: EditWatcher?
     private let hud = HUD()
     private var hotkey: HotkeyTap
     private var levelTimer: Timer?
@@ -47,6 +49,20 @@ final class VoiceController {
         self.hotkey = HotkeyTap(config: config)
         hotkey.onToggle = { [weak self] in self?.toggle() }
         hotkey.onCancel = { [weak self] in self?.cancel() }
+
+        // 从用户的手工修改中学习：粘贴后短窗口内观测输入框
+        let watcher = EditWatcher(config: config, sidecar: sidecar)
+        watcher.onLearned = { [weak self] terms in
+            self?.hud.flash(title: "学到新词", detail: terms.joined(separator: "、"), seconds: 2.0)
+        }
+        watcher.onCorrection = { corrected in
+            // 写回语料当标注：以后算准确率、做回归都靠这个字段
+            guard let last = Recordings.lastTranscript() else { return }
+            if Recordings.applyCorrection(ts: last.ts, corrected: corrected) {
+                Log.shared.info("已记录改正：\(corrected.prefix(40))…")
+            }
+        }
+        self.editWatcher = watcher
     }
 
     /// 启动识别服务与热键监听。
@@ -219,18 +235,15 @@ final class VoiceController {
             guard let self else { return }
             // 临时文件的生命周期：开了留存就归档，否则用完即删
             func dispose(archiving value: Sidecar.Result?) {
-                guard let value, self.config.keepRecordings else {
-                    try? FileManager.default.removeItem(at: url)
-                    return
-                }
+                // 文本永远记录（学习闭环依赖它）；音频存不存由 record() 内部按配置决定
                 let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 44
-                Recordings.archive(
+                Recordings.record(
                     wav: url,
                     seconds: Double(bytes - 44) / 32000,   // 16kHz 单声道 PCM16 = 32 字节/毫秒
-                    raw: value.raw,
-                    text: value.text,
-                    hits: value.hits,
-                    timings: ["asr": value.asrMilliseconds, "total": value.totalMilliseconds],
+                    raw: value?.raw ?? "",
+                    text: value?.text ?? "",
+                    hits: value?.hits ?? [],
+                    timings: value.map { ["asr": $0.asrMilliseconds, "total": $0.totalMilliseconds] } ?? [:],
                     config: self.config
                 )
             }
@@ -253,6 +266,8 @@ final class VoiceController {
                     if pasted {
                         let saved = value.raw == value.text ? "未改动" : "已清理 \(value.hits.count) 处"
                         self.hud.flash(title: "已输入", detail: "\(saved) · \(value.text.prefix(28))", seconds: 1.4)
+                        // 粘贴成功了才开始观测：用户接下来对这段文字的任何手改都是学习信号
+                        self.editWatcher?.start(pasted: value.text, raw: value.raw)
                     } else if !Injector.isTrusted {
                         self.hud.flash(title: "已复制到剪贴板", detail: "授予辅助功能权限后可直接粘贴", seconds: 3.5)
                     } else {
@@ -424,22 +439,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(menu, title: "打开配置", action: #selector(openConfig))
         add(menu, title: "打开日志", action: #selector(openLog))
 
-        if controller.config.keepRecordings {
-            let stats = Recordings.statistics()
-            let recordings = NSMenuItem(
-                title: "录音留存：\(stats.count) 条 · \(stats.megabytes)MB",
-                action: nil, keyEquivalent: ""
-            )
-            let recordingsMenu = NSMenu()
-            let openItem = NSMenuItem(title: "打开录音目录", action: #selector(openRecordings), keyEquivalent: "")
-            openItem.target = self
-            recordingsMenu.addItem(openItem)
-            let clearItem = NSMenuItem(title: "清空录音与元数据…", action: #selector(clearRecordings), keyEquivalent: "")
-            clearItem.target = self
-            recordingsMenu.addItem(clearItem)
-            recordings.submenu = recordingsMenu
-            menu.addItem(recordings)
-        }
+        // 语料：文本永远记录，音频看 keepRecordings
+        let stats = Recordings.statistics()
+        let corpus = NSMenuItem(
+            title: "语料：\(stats.count) 条" + (controller.config.keepRecordings ? " · \(stats.megabytes)MB 录音" : ""),
+            action: nil, keyEquivalent: ""
+        )
+        let corpusMenu = NSMenu()
+        let openCorpus = NSMenuItem(title: "打开语料目录", action: #selector(openRecordings), keyEquivalent: "")
+        openCorpus.target = self
+        corpusMenu.addItem(openCorpus)
+        let clearCorpus = NSMenuItem(title: "清空语料与录音…", action: #selector(clearRecordings), keyEquivalent: "")
+        clearCorpus.target = self
+        corpusMenu.addItem(clearCorpus)
+        corpus.submenu = corpusMenu
+        menu.addItem(corpus)
+
+        // 学习闭环：从用户的手工修改里学术语
+        let learning = NSMenuItem(title: "学习", action: nil, keyEquivalent: "")
+        let learningMenu = NSMenu()
+
+        let learnToggle = NSMenuItem(
+            title: controller.config.learnFromEdits ? "从我的修改中学习：开" : "从我的修改中学习：关",
+            action: #selector(toggleLearning), keyEquivalent: ""
+        )
+        learnToggle.target = self
+        learnToggle.state = controller.config.learnFromEdits ? .on : .off
+        learningMenu.addItem(learnToggle)
+
+        let dictItem = NSMenuItem(title: "打开我的词表…", action: #selector(openDictionary), keyEquivalent: "")
+        dictItem.target = self
+        learningMenu.addItem(dictItem)
+
+        let privacyHint = NSMenuItem(title: "粘贴后 25 秒内观测输入框；内容只在本机", action: nil, keyEquivalent: "")
+        privacyHint.isEnabled = false
+        learningMenu.addItem(privacyHint)
+
+        learning.submenu = learningMenu
+        menu.addItem(learning)
 
         if !controller.config.devSidecarRoot.isEmpty {
             let dev = NSMenuItem(
@@ -475,6 +512,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func openRecordings() {
         try? FileManager.default.createDirectory(at: Recordings.root, withIntermediateDirectories: true)
         NSWorkspace.shared.open(Recordings.root)
+    }
+
+    /// 打开用户词表。文件不存在就先建一份带说明的空表，免得用户开出来一个空白。
+    @objc private func openDictionary() {
+        let path = Paths.dictionary
+        if !FileManager.default.fileExists(atPath: path.path) {
+            let seed: [String: Any] = [
+                "_comment": "用户专有名词表。这里的词会注入润色用的 system prompt，帮助纠正发音相近的错误写法。可以手动增删；从你的修改中学到的词也会自动加进来。",
+                "terms": [],
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: seed, options: [.prettyPrinted, .sortedKeys]) {
+                try? data.write(to: path)
+            }
+        }
+        NSWorkspace.shared.open(path)
+    }
+
+    @objc private func toggleLearning() {
+        var config = ConfigStore.load()
+        config.learnFromEdits.toggle()
+        ConfigStore.save(config)
+        Log.shared.info("学习模式已\(config.learnFromEdits ? "开启" : "关闭")")
+        reloadConfig()
     }
 
     @objc private func clearRecordings() {

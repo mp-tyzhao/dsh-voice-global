@@ -14,7 +14,9 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { alignmentGaps, tokenize } from './dictionary.mjs';
 
 /** 太短的不收：单字多半是"的/了/在"这类，收进去只会造成误伤。 */
@@ -173,4 +175,32 @@ export function mergeTerms(dictionaryPath, newTerms) {
     fs.writeFileSync(dictionaryPath, `${JSON.stringify(document, null, 2)}\n`);
   }
   return { added, total: terms.length };
+}
+
+/**
+ * CLI 入口：宿主（Swift）学到一次改正后调用它。
+ *
+ *   node learning.mjs --raw "<原文>" --corrected "<改正后>" [--dict <路径>] [--dry]
+ *
+ * 输出一行 JSON：{"added":[...],"total":N,"candidates":[...]}
+ * 只在 --dry 时不写文件。
+ */
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  const argv = process.argv.slice(2);
+  const value = (name) => {
+    const i = argv.indexOf(name);
+    return i >= 0 && i + 1 < argv.length ? argv[i + 1] : undefined;
+  };
+  const raw = value('--raw') ?? '';
+  const corrected = value('--corrected') ?? '';
+  const dictPath = value('--dict')
+    || path.join(os.homedir(), '.voice-global', 'dictionary.json');
+
+  const candidates = extractTerms(raw, corrected);
+  if (argv.includes('--dry')) {
+    process.stdout.write(`${JSON.stringify({ added: [], total: 0, candidates })}\n`);
+  } else {
+    const { added, total } = mergeTerms(dictPath, candidates);
+    process.stdout.write(`${JSON.stringify({ added, total, candidates })}\n`);
+  }
 }

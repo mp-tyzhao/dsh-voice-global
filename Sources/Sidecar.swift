@@ -186,6 +186,43 @@ final class Sidecar {
         }
     }
 
+    /// 把一次「用户改正」交给学习脚本，返回这次新学到的词。
+    ///
+    /// 学习逻辑在 `sidecar/learning.mjs` 里（和词表、防编造校验共用同一套对齐代码），
+    /// 这里只是起一个短命 node 进程跑它 —— 改正不常发生，不值得为它改协议。
+    func learn(raw: String, corrected: String, config: VoiceConfig, completion: @escaping ([String]) -> Void) {
+        queue.async { [self] in
+            var added: [String] = []
+            defer { DispatchQueue.main.async { completion(added) } }
+            do {
+                let node = try resolveNode(config: config)
+                let script = try resolveScript(config: config)
+                let learner = script.deletingLastPathComponent().appendingPathComponent("learning.mjs")
+                guard FileManager.default.fileExists(atPath: learner.path) else { return }
+
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: node)
+                process.arguments = [learner.path, "--raw", raw, "--corrected", corrected]
+                var environment = ProcessInfo.processInfo.environment
+                environment["HOME"] = Paths.userHome.path
+                process.environment = environment
+
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = FileHandle.nullDevice
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+
+                guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let list = object["added"] as? [String] else { return }
+                added = list
+            } catch {
+                Log.shared.error("学习失败：\(error)")
+            }
+        }
+    }
+
     func stop() {
         queue.sync {
             intentionalStop = process != nil

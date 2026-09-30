@@ -37,6 +37,8 @@ enum Paths {
     /// 密钥文件（0600）：`KEY=value` 形式，避免把密钥写进可分享的 config.json。
     static var envFile: URL { home.appendingPathComponent(".env") }
     static var models: URL { home.appendingPathComponent("models", isDirectory: true) }
+    /// 用户词表：注入润色 prompt，并从手改中自动生长
+    static var dictionary: URL { home.appendingPathComponent("dictionary.json") }
 
     /// 应用包内资源目录。打包分发时把 Node 运行时与识别模型放进这里，
     /// 目标机器就不用自己装 Node、也不用首次下载 231MB 模型。
@@ -112,6 +114,13 @@ struct VoiceConfig: Codable {
     /// 只剥末尾，中间的断句标点全部保留。注意 `？` 也在剥离范围内。
     var trimEndPunctuation = true
 
+    /// 从用户的手工修改中学习术语 —— "越用越聪明"的来源。
+    ///
+    /// 开启后：粘贴完在**短窗口内**观测焦点输入框（默认 25 秒），
+    /// 检测到改动就把前后差异交给学习模块、抽出术语进词表。
+    /// 焦点一换就停，不做常驻监视；**内容只在本机用来抽词，不上传**。
+    var learnFromEdits = true
+
     // MARK: - 开发模式（特别版）
 
     /// sidecar 源码目录（仓库根路径）。填了就不再用 app 包内的那份拷贝，
@@ -153,7 +162,7 @@ struct VoiceConfig: Codable {
         case language, cleanup, tapMaxSeconds, nodePath, modelRoot, threads
         case modelPath, tokensPath, vadPath
         case restoreClipboard, pasteDelayMs, restoreDelayMs, showHUD, playSounds, llm
-        case idleUnloadSeconds, trimEndPunctuation
+        case idleUnloadSeconds, trimEndPunctuation, learnFromEdits
         case devSidecarRoot, devAutoReload
         case keepRecordings, recordingsMaxCount, recordingsMaxMB, recordingsMaxDays
     }
@@ -176,6 +185,7 @@ struct VoiceConfig: Codable {
         playSounds = c.fallback(.playSounds, true)
         idleUnloadSeconds = c.fallback(.idleUnloadSeconds, 300)
         trimEndPunctuation = c.fallback(.trimEndPunctuation, true)
+        learnFromEdits = c.fallback(.learnFromEdits, true)
         devSidecarRoot = c.fallback(.devSidecarRoot, "")
         devAutoReload = c.fallback(.devAutoReload, true)
         keepRecordings = c.fallback(.keepRecordings, false)
@@ -203,6 +213,7 @@ struct VoiceConfig: Codable {
         try c.encode(playSounds, forKey: .playSounds)
         try c.encode(idleUnloadSeconds, forKey: .idleUnloadSeconds)
         try c.encode(trimEndPunctuation, forKey: .trimEndPunctuation)
+        try c.encode(learnFromEdits, forKey: .learnFromEdits)
         try c.encode(devSidecarRoot, forKey: .devSidecarRoot)
         try c.encode(devAutoReload, forKey: .devAutoReload)
         try c.encode(keepRecordings, forKey: .keepRecordings)
