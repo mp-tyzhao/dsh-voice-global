@@ -527,7 +527,14 @@ function argValue(name) {
 
 // 列出可用的模型档案。换模型时先跑这个看有哪些可选。
 if (argv.includes('--list-profiles')) {
-  const roots = [MODEL_ROOT, process.env.VOICE_GLOBAL_MODEL_ROOT_ALT].filter(Boolean);
+  // 扫两处：配置的模型根目录，以及 ~/.voice-global/models。
+  // 只看前者的话，用户自己下到默认目录的模型不会出现在菜单里 ——
+  // 那这个"可切换"就是假的。
+  const roots = [...new Set([
+    MODEL_ROOT,
+    join(homedir(), '.voice-global', 'models'),
+    MODEL_DIR,
+  ].filter(Boolean))];
   const found = discoverProfiles(roots);
   const active = PROFILE;
   process.stdout.write(`${JSON.stringify({

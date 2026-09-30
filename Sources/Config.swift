@@ -155,6 +155,32 @@ struct VoiceConfig: Codable {
         return (root as NSString).appendingPathComponent(modelDir)
     }
 
+    /// 模型目录里 profile.json 声明的权重/词表文件名。
+    ///
+    /// 为什么不让诊断代码自己拼路径：`--check` 原先硬编码 `sensevoice-onnx/
+    /// model.int8.onnx`，而 sidecar 是按档案解析的 —— 两处各算一遍，
+    /// 换了模型之后诊断会报错的路径，甚至显示"就绪"但实际加载的是别的模型。
+    /// 统一读档案，只有一个来源。
+    var modelFileNames: (model: String, tokens: String) {
+        let dir = resolvedModelDir
+        let profilePath = (dir as NSString).appendingPathComponent("profile.json")
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: profilePath)),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            var model = object["model"] as? String
+            // 不同模型类型权重字段不同：Whisper 是 encoder/decoder 两个文件，
+            // transducer 是 encoder/decoder/joiner，只有 SenseVoice 这类用顶层 model
+            if model == nil, let whisper = object["whisper"] as? [String: Any] {
+                model = whisper["encoder"] as? String
+            }
+            if model == nil, let transducer = object["transducer"] as? [String: Any] {
+                model = transducer["encoder"] as? String
+            }
+            let tokens = object["tokens"] as? String ?? "tokens.txt"
+            return (model ?? "model.int8.onnx", tokens)
+        }
+        return ("model.int8.onnx", "tokens.txt")
+    }
+
     static var detectedModelRoot: String {
         let fileManager = FileManager.default
         var candidates: [String] = []

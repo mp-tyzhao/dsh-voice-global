@@ -222,6 +222,45 @@ final class Sidecar {
         }
     }
 
+    /// 列出可用的语音模型档案（给「语音模型」菜单用）。
+    ///
+    /// 返回 (可用档案列表, 当前生效的那条)。换模型不该逼用户去敲命令行 ——
+    /// 这个功能的全部意义就是让人能方便地对比不同模型。
+    func listProfiles(config: VoiceConfig, completion: @escaping ([[String: Any]], [String: Any]) -> Void) {
+        queue.async { [self] in
+            var available: [[String: Any]] = []
+            var active: [String: Any] = [:]
+            defer { DispatchQueue.main.async { completion(available, active) } }
+            do {
+                let node = try resolveNode(config: config)
+                let script = try resolveScript(config: config)
+                let server = script.deletingLastPathComponent().appendingPathComponent("server.mjs")
+                guard FileManager.default.fileExists(atPath: server.path) else { return }
+
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: node)
+                process.arguments = [server.path, "--list-profiles"]
+                var environment = ProcessInfo.processInfo.environment
+                environment["HOME"] = Paths.userHome.path
+                environment["VOICE_GLOBAL_MODEL_ROOT"] = config.resolvedModelRoot
+                process.environment = environment
+
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = FileHandle.nullDevice
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+
+                guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+                available = object["available"] as? [[String: Any]] ?? []
+                active = object["active"] as? [String: Any] ?? [:]
+            } catch {
+                Log.shared.error("列出语音模型失败：\(error)")
+            }
+        }
+    }
+
     /// 读词表（带来源标记），给「审查学到的词」用
     func listTerms(config: VoiceConfig, completion: @escaping ([[String: Any]]) -> Void) {
         runLearner(arguments: ["--list"], config: config) { object in

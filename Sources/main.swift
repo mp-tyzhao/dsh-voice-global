@@ -38,6 +38,11 @@ final class VoiceController {
     /// 观测用户对转写结果的手工修改（"越用越聪明"的信号源）
     private var editWatcher: EditWatcher?
 
+    /// 列出可用语音模型
+    func listProfiles(completion: @escaping ([[String: Any]], [String: Any]) -> Void) {
+        sidecar.listProfiles(config: config, completion: completion)
+    }
+
     /// 词表管理（审查 / 撤销 / 导入）。sidecar 是私有的，对外只开这几个动作。
     func listTerms(completion: @escaping ([[String: Any]]) -> Void) {
         sidecar.listTerms(config: config, completion: completion)
@@ -327,6 +332,8 @@ final class VoiceController {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
+    /// 可用语音模型档案（启动时查一次，菜单里用）
+    private var modelProfiles: [[String: Any]] = []
     private var controller: VoiceController?
     private var permissionTimer: Timer?
 
@@ -384,6 +391,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
             }
             self.rebuildMenu(state: .idle)
+            // 启动时查一次可用模型，供「语音模型」菜单使用
+            self.controller?.listProfiles { [weak self] available, _ in
+                guard let self else { return }
+                self.modelProfiles = available
+                self.rebuildMenu(state: self.controller?.state ?? .idle)
+            }
         }
 
         // 粘贴必须由已授权的进程合成 ⌘V；没有权限就立刻引导一次，
@@ -473,6 +486,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         add(menu, title: "打开配置", action: #selector(openConfig))
+        menu.addItem(buildModelMenu())
         add(menu, title: "打开日志", action: #selector(openLog))
 
         // 语料：文本永远记录，音频看 keepRecordings
@@ -775,6 +789,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// 语音模型子菜单：列出所有可用档案，点一下切换。
+    private func buildModelMenu() -> NSMenuItem {
+        let item = NSMenuItem(
+            title: "语音模型：\(modelProfiles.first(where: { ($0["active"] as? Bool) == true })?["label"] as? String ?? "加载中…")",
+            action: nil, keyEquivalent: ""
+        )
+        let submenu = NSMenu()
+        if modelProfiles.isEmpty {
+            let loading = NSMenuItem(title: "正在查找可用模型…", action: nil, keyEquivalent: "")
+            loading.isEnabled = false
+            submenu.addItem(loading)
+        } else {
+            for profile in modelProfiles {
+                let label = profile["label"] as? String ?? profile["id"] as? String ?? "?"
+                let dir = profile["dir"] as? String ?? ""
+                let menuItem = NSMenuItem(title: label, action: #selector(switchModel(_:)), keyEquivalent: "")
+                menuItem.target = self
+                menuItem.representedObject = dir
+                menuItem.state = (profile["active"] as? Bool) == true ? .on : .off
+                // 支持解码期热词的模型标注出来 —— 这是换模型最有价值的一条差异
+                if (profile["supportsHotwords"] as? Bool) == true {
+                    menuItem.title = "\(label)（支持热词）"
+                }
+                submenu.addItem(menuItem)
+            }
+            submenu.addItem(.separator())
+            let hint = NSMenuItem(title: "换模型后下次听写即生效", action: nil, keyEquivalent: "")
+            hint.isEnabled = false
+            submenu.addItem(hint)
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    /// 切换语音模型：把模型目录写进配置，然后重载。
+    @objc private func switchModel(_ sender: NSMenuItem) {
+        guard let dir = sender.representedObject as? String, !dir.isEmpty else { return }
+        var config = ConfigStore.load()
+        // 存成相对模型根的路径，换机器/换目录后仍能用；不在根下面才存绝对路径
+        let root = config.resolvedModelRoot
+        config.modelDir = dir.hasPrefix(root + "/") ? String(dir.dropFirst(root.count + 1)) : dir
+        ConfigStore.save(config)
+        Log.shared.info("切换语音模型：\(config.modelDir)")
+        reloadConfig()
+        let name = sender.title.replacingOccurrences(of: "（支持热词）", with: "")
+        showAlert(title: "已切换到 \(name)", body: """
+        下次听写生效。
+
+        模型目录：\(dir)
+        """)
+    }
+
     @objc private func openDictionary() {
         let path = Paths.dictionary
         if !FileManager.default.fileExists(atPath: path.path) {
@@ -862,9 +928,12 @@ enum Diagnostics {
     /// 收集一份可粘贴给他人排查的报告（不含任何密钥）。
     static func collect(config: VoiceConfig) -> String {
         let modelRoot = config.resolvedModelRoot
-        let model = "\(modelRoot)/sensevoice-onnx/model.int8.onnx"
-        let tokens = "\(modelRoot)/sensevoice-onnx/tokens.txt"
-        let vad = "\(modelRoot)/silero/silero_vad.onnx"
+        // 走和 sidecar 同一套解析（模型目录 + profile.json），不要自己拼路径
+        let modelDir = config.resolvedModelDir
+        let names = config.modelFileNames
+        let model = "\(modelDir)/\(names.model)"
+        let tokens = "\(modelDir)/\(names.tokens)"
+        let vad = "\(config.resolvedModelRoot)/silero/silero_vad.onnx"
 
         func mark(_ condition: Bool) -> String { condition ? "✅" : "❌" }
 
