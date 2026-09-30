@@ -57,7 +57,7 @@ cd voice-global
 | 步骤 | 它会做什么 | 关键点 |
 | --- | --- | --- |
 | 1 环境检查 | macOS / swiftc / node 版本 | 缺什么就装什么 |
-| 2 识别运行库 | 项目里已有就跳过；否则 npm 安装；再不行就从本机 DSH 提取 | 都不行会明确报错 |
+| 2 识别运行库 | 项目里已有就跳过；否则 npm 安装（官方源失败自动回退 npmmirror）；再不行就从本机 DSH 提取 | 三条路都不行才会明确报错 |
 | 3 识别模型 | **先找现成的**：自带目录 → 本机 DSH 已下载的语音包（原地复用，不复制不下载）→ 都没有才下载 231MB | 有 DSH 的机器不会重复下载 |
 | 4 润色模型 | 验证密钥 → 写入 `~/.voice-global/.env` → 开启 `cleanup=llm` | `--no-llm` 时跳过，纯离线 |
 | 5 构建 | 生成 `build/DSH Voice.app`，并生成本地签名证书 | 有固定证书就不必反复授权 |
@@ -139,7 +139,7 @@ APP="build/DSH Voice.app/Contents/MacOS/DSHVoice"
 | 转写正常但没有标点 | 菜单里的清理模式 | 说明在 `rules` 模式；确认 `.env` 里有密钥且 `cleanup=llm` |
 | 润色报错或超时 | 日志里的 `tokens` 行 | 密钥/网络问题；超时会自动退回规则层结果，不影响使用 |
 | 重新构建后要重新授权 | `codesign -d -r- "build/DSH Voice.app"` | 应显示 `certificate leaf = H"…"`；如果是 `cdhash`，说明签名证书没生成，跑 `bash scripts/setup-signing.sh` |
-| 第 2 步提示 npm 安装失败 | 这通常不是问题 | 脚本会自动改从本机 DSH 提取原生库；两者都失败才会真的报错 |
+| 第 2 步 npm 报 `ECONNREFUSED` | 这是 npm 官方源不可达，很常见 | 脚本会自动改用 npmmirror 重试；镜像也不通才会退回"从本机 DSH 提取原生库"，三者都失败才报错 |
 | 模型下载很慢 | 看脚本打印的"探测结果" | 自动选中 HF-Mirror；也可 `--source` 强制指定，或先在有 DSH 的机器上装好再复用 |
 | 内存占用高 | `ps -o rss= -p $(pgrep -f server.mjs)` | 识别进程常驻约 900MB；`idleUnloadSeconds` 默认 300 秒空闲即释放 |
 

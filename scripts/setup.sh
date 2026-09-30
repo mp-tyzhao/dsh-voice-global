@@ -14,6 +14,7 @@
 #   ./scripts/setup.sh --no-llm                 # 纯离线，不配置润色
 #   ./scripts/setup.sh --model-root /path       # 复用指定模型目录
 #   ./scripts/setup.sh --skip-build             # 只装依赖和模型
+#   ./scripts/setup.sh --npm-registry <url>     # 指定 npm 源（默认官方源失败后回退 npmmirror）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,6 +27,8 @@ SKIP_BUILD=0
 MODEL_ROOT=""
 BASE_URL="https://api.deepseek.com/v1"
 MODEL="deepseek-flash"
+# npm 官方源在部分网络下不可达（ECONNREFUSED），默认回退到国内镜像
+NPM_MIRROR="https://registry.npmmirror.com"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -35,6 +38,7 @@ while [ $# -gt 0 ]; do
     --model-root) MODEL_ROOT="${2:-}"; shift 2 ;;
     --base-url) BASE_URL="${2:-}"; shift 2 ;;
     --model) MODEL="${2:-}"; shift 2 ;;
+    --npm-registry) NPM_MIRROR="${2:-}"; shift 2 ;;
     -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "未知参数：$1"; exit 2 ;;
   esac
@@ -77,10 +81,14 @@ else
   if command -v npm >/dev/null 2>&1; then
     echo "  从 npm 安装…"
     if (cd sidecar && npm install --no-audit --no-fund >/tmp/voice-global-npm.log 2>&1); then
-      ok "已从 npm 安装"
+      ok "已从 npm 安装（官方源）"
+      INSTALLED=1
+    elif (cd sidecar && npm install --no-audit --no-fund --registry "$NPM_MIRROR" >>/tmp/voice-global-npm.log 2>&1); then
+      # 官方源不可达是常见情况（ECONNREFUSED），镜像一般都能通
+      ok "已从 npm 安装（镜像源 $(echo "$NPM_MIRROR" | sed 's|https\?://||')）"
       INSTALLED=1
     else
-      warn "npm 安装失败（见 /tmp/voice-global-npm.log），尝试其它来源"
+      warn "npm 安装失败（官方源与镜像都不通，见 /tmp/voice-global-npm.log），尝试其它来源"
     fi
   fi
   if [ "$INSTALLED" -eq 0 ] && [ -d "$DSH_APP" ]; then

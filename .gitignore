@@ -2,6 +2,7 @@
 build/
 node_modules/
 sidecar/node_modules/
+sidecar/package-lock.json
 *.app/
 
 # 本机状态（配置、密钥、日志、录音、签名素材）都不进仓库

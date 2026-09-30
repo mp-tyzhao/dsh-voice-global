@@ -51,7 +51,7 @@ The installer's strategy is **reuse what's already on this machine before buildi
 
 | Step | Logic |
 | --- | --- |
-| Recognition runtime | already vendored in the repo → `npm install` → extract the native library from a local DeepSeek Harness install |
+| Recognition runtime | already vendored in the repo → `npm install` (falls back to the npmmirror registry when the official one is unreachable) → extract the native library from a local DeepSeek Harness install |
 | Recognition model | already in the project's own directory → **reuse the voice pack your local DSH already downloaded, in place (saves a 228MB download)** → only download from HuggingFace if neither exists |
 | Polish model | use `--api-key` or the `DEEPSEEK_API_KEY` environment variable; without one it falls back to fully offline and explains how to get a key |
 
