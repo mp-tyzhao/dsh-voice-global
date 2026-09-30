@@ -32,7 +32,7 @@ import { performance } from 'node:perf_hooks';
 import { clean, trimEndPunctuation } from './cleanup.mjs';
 import { polish, isPlausible } from './llm.mjs';
 import { loadTerms, renderVocabularyPrompt, stripFabricatedTerms } from './dictionary.mjs';
-import { applyTerms } from './phonetic.mjs';
+import { applyTerms, selectRelevantTerms } from './phonetic.mjs';
 import { loadProfile, buildModelConfig, decodingMethod, supportsHotwords, discoverProfiles } from './profiles.mjs';
 
 const require = createRequire(import.meta.url);
@@ -75,6 +75,35 @@ const DEFAULT_LANGUAGE = PROFILE.senseVoice?.language ?? PROFILE.whisper?.langua
 const DICTIONARY_PATH = process.env.VOICE_GLOBAL_DICTIONARY
   || join(homedir(), '.voice-global', 'dictionary.json');
 let termsCache = { mtimeMs: -1, terms: [], prompt: '' };
+
+/** 词表小的时候全量注入，大了才按句检索。 */
+const FULL_INJECT_LIMIT = Number(process.env.VOICE_GLOBAL_FULL_INJECT ?? 50);
+
+/**
+ * 给这一句挑要注入提示的词。
+ *
+ * 为什么不一律按句检索：检索靠"原文里有发音痕迹"，而 `tys → Typeless`
+ * 这类大跨度错误恰恰**没有痕迹**（前缀只重合两个字母，相似度也低）。
+ * 一律检索会把这一类词漏掉，而它们正是最需要 LLM 补的。
+ *
+ * 所以小词表全量注入（召回优先，反正没几个 token）；词表长大后
+ * （> FULL_INJECT_LIMIT）才检索 —— 那时全量的代价开始显现：
+ * prompt 变长，而且模型更容易从长列表里挑一个词凭空插进去。
+ *
+ * @param {string} raw ASR 原文
+ * @param {{terms: string[], prompt: string}} vocabulary
+ * @returns {string} 注入提示的词表文本
+ */
+function promptFor(raw, vocabulary) {
+  if (!vocabulary.terms.length) return '';
+  if (vocabulary.terms.length <= FULL_INJECT_LIMIT) return vocabulary.prompt;
+
+  const picked = selectRelevantTerms(raw, vocabulary.terms);
+  if (!picked.length) return '';
+  log(`词表检索：${vocabulary.terms.length} 条里选中 ${picked.length} 条`);
+  return renderVocabularyPrompt(picked.map((entry) => entry.term));
+}
+
 
 function currentVocabulary() {
   try {
@@ -386,7 +415,7 @@ async function handle({ wavPath, language = DEFAULT_LANGUAGE, cleanup = 'rules' 
           apiKey: LLM.apiKey,
           model: LLM.model,
           text: base,
-          vocabularyText: vocabulary.prompt,
+          vocabularyText: promptFor(base, vocabulary),
           timeoutMs: LLM.timeoutMs,
           onUsage: (usage) => {
             // 记到日志里，方便随时核算成本

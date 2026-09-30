@@ -111,6 +111,22 @@ struct RecordingsTest {
             .split(separator: "\n", omittingEmptySubsequences: true).count
         check("只记文本的条目不会被 prune 当坏行丢掉（实际 \(prunedTextOnly) 条）", prunedTextOnly == 1)
 
+        // 8. 密集归档不能撞名（真 bug：文件名只到毫秒，同一毫秒内两次归档
+        //    会让 moveItem 失败、音频静默丢失）
+        var burst = VoiceConfig()
+        burst.keepRecordings = true
+        Recordings.clearAll()
+        let burstCount = 12
+        for i in 0..<burstCount { archive("burst-\(i)", config: burst) }
+        let burstAudio = (try? FileManager.default.contentsOfDirectory(
+            at: Recordings.audioDirectory, includingPropertiesForKeys: nil
+        ))?.filter { $0.pathExtension == "wav" }.count ?? 0
+        check("密集归档 \(burstCount) 条，音频一个不少（实际 \(burstAudio)）", burstAudio == burstCount)
+
+        let burstLines = ((try? String(contentsOf: Recordings.indexFile, encoding: .utf8)) ?? "")
+            .split(separator: "\n", omittingEmptySubsequences: true).count
+        check("密集归档的元数据条数正确", burstLines == burstCount)
+
         print()
         if failures == 0 {
             print("ALL PASS (全部通过)")

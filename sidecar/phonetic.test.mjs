@@ -6,7 +6,7 @@
  * 这个组件判错会**主动改坏本来正确的文字**，所以误伤用例比命中用例更重要。
  */
 
-import { syllableOf, syllableDistance, phonemeDistance, latinSimilarity, windowScore, applyTerms } from './phonetic.mjs';
+import { syllableOf, syllableDistance, phonemeDistance, latinSimilarity, windowScore, applyTerms, selectRelevantTerms } from './phonetic.mjs';
 
 let failures = 0;
 function check(label, ok, detail) {
@@ -107,6 +107,37 @@ console.log('\n— 不该动的（误伤比漏改严重得多）—');
   // 短西文词不能去匹配长词内部（`de` 不该在 `deploy` 里被匹配）
   const r = applyTerms('把代码 deploy 到环境', ['de']);
   check('西文词要求整词对齐（de 不匹配 deploy）', r.applied.length === 0, JSON.stringify(r.applied));
+}
+
+console.log('\n— 按句检索词表 —');
+{
+  const terms = ['Typeless', 'LLM', 'prompt', 'DSH Voice', 'SenseVoice', 'Kubernetes', 'Milvus', '赵天翊', '奇绩创坛', '用户侧自进化'];
+
+  // 该选中的
+  const a = selectRelevantTerms('我们想一想怎么样能像tys那样', terms).map((t) => t.term);
+  check('前缀重合能捞回大跨度错误（tys → Typeless）', a.includes('Typeless'), JSON.stringify(a));
+
+  const b = selectRelevantTerms('这个需求由赵天义负责', terms).map((t) => t.term);
+  check('同音字能捞回（赵天义 → 赵天翊）', b.includes('赵天翊'), JSON.stringify(b));
+
+  const c = selectRelevantTerms('你看用户测自净化这两个词', terms).map((t) => t.term);
+  check('模糊音也能捞回（用户测自净化 → 用户侧自进化）', c.includes('用户侧自进化'), JSON.stringify(c));
+
+  // 不该选中的：跟这句毫无关系的词注入进去只会让模型乱挑
+  const d = selectRelevantTerms('今天天气不错我们下午三点开会', terms);
+  check('无关句子一条都不选', d.length === 0, JSON.stringify(d.map((t) => t.term)));
+
+  // 边界
+  check('空原文不崩', selectRelevantTerms('', terms).length === 0);
+  check('空词表不崩', selectRelevantTerms('随便说点什么', []).length === 0);
+  check('结果按相关度降序', (() => {
+    const r = selectRelevantTerms('我们用 Milvus 和 Typeless', terms);
+    return r.every((item, i) => i === 0 || r[i - 1].score >= item.score);
+  })());
+  check('limit 生效', selectRelevantTerms('我们用 Milvus 和 Typeless', terms, { limit: 1 }).length <= 1);
+  // 已经写对的词要认出来（reason=literal），不该被当成"可疑"
+  const literal = selectRelevantTerms('我们用 Milvus 做检索', terms).find((t) => t.term === 'Milvus');
+  check('已写对的词标记为 literal', literal?.reason === 'literal', JSON.stringify(literal));
 }
 
 console.log('\n— 幂等性与多词 —');

@@ -234,3 +234,71 @@ export function applyTerms(text, terms, options = {}) {
       .map(({ from, to, score }) => ({ from, to, score: Number(score.toFixed(3)) })),
   };
 }
+
+/**
+ * 从词表里挑出**这一句相关的**词。
+ *
+ * 动机（DiP-ASR, EMNLP 2024 Findings）：把整个词表塞进提示，模型不但要多读，
+ * 还会从里面挑一个词凭空插进去。只给它"这句里确实有痕迹"的词，两个问题一起缓解。
+ *
+ * "有痕迹"分三种：
+ *   1. 字面直接出现（已经写对了，或只差标点）
+ *   2. 有一段发音接近（中文同音字、西文拼写接近）—— 这是最典型的"被听错"
+ *   3. 西文词有前缀重合（`tys` 与 `Typeless`）—— 这类跨度大，纯相似度指标抓不到，
+ *      但首字母加长度是最省事又有效的信号
+ *
+ * 三种都不沾的词，对这句话没有帮助，注入只会添乱。
+ *
+ * @param {string} raw ASR 原文
+ * @param {string[]} terms 全量词表
+ * @param {{limit?: number, latinPrefix?: number}} [options]
+ * @returns {{term: string, score: number, reason: string}[]} 按相关度降序
+ */
+export function selectRelevantTerms(raw, terms, options = {}) {
+  const limit = options.limit ?? 40;
+  const latinPrefix = options.latinPrefix ?? 2;
+  if (!raw || !terms?.length) return [];
+
+  const chars = Array.from(raw);
+  const lowerRaw = raw.toLowerCase();
+  const words = lowerRaw.split(/[^a-z0-9]+/u).filter(Boolean);
+  const scored = [];
+
+  for (const term of terms) {
+    const termChars = Array.from(term);
+    const isLatin = /^[A-Za-z0-9]/.test(term);
+    let best = 0;
+    let reason = '';
+
+    if (lowerRaw.includes(term.toLowerCase())) {
+      best = 1;
+      reason = 'literal';
+    } else if (isLatin) {
+      const lower = term.toLowerCase();
+      for (const word of words) {
+        const prefix = Math.min(latinPrefix, lower.length, word.length);
+        // 前缀重合：`tys` 与 `typeless` 共享 `ty`。
+        // 纯相似度指标在这里会给出很低的分（跨度太大），所以单独补一条。
+        if (prefix > 0 && word.slice(0, prefix) === lower.slice(0, prefix)) {
+          const ratio = word.length / lower.length;
+          // 长短差太多就不是同一个词（`to` 不该因为共享 `t` 而匹配 `typeless`）
+          const score = 0.55 + 0.25 * (1 - Math.min(1, Math.abs(1 - ratio)));
+          if (score > best) { best = score; reason = 'latin-prefix'; }
+        }
+        const similarity = latinSimilarity(word, lower);
+        if (similarity > best) { best = similarity; reason = 'latin-fuzzy'; }
+      }
+    } else {
+      // 中文：滑动窗口找发音最接近的一段
+      for (let start = 0; start + termChars.length <= chars.length; start += 1) {
+        const window = chars.slice(start, start + termChars.length).join('');
+        const score = windowScore(window, term);
+        if (score > best) { best = score; reason = 'phonetic'; }
+      }
+    }
+
+    if (best >= 0.5) scored.push({ term, score: Number(best.toFixed(3)), reason });
+  }
+
+  return scored.sort((a, b) => b.score - a.score).slice(0, limit);
+}

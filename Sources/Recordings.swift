@@ -61,8 +61,20 @@ enum Recordings {
         if config.keepRecordings {
             do {
                 try fileManager.createDirectory(at: audioDirectory, withIntermediateDirectories: true)
-                let name = "\(stamp(for: Date())).wav"
-                try fileManager.moveItem(at: wav, to: audioDirectory.appendingPathComponent(name))
+                // 文件名只到毫秒。连续两次归档落在同一毫秒时（测试里密集调用、
+                // 或极快的两次听写）会撞名，moveItem 直接失败、音频丢失。
+                // 撞了就加序号 —— 丢一段录音是不可接受的。
+                let base = stamp(for: Date())
+                var name = "\(base).wav"
+                var destination = audioDirectory.appendingPathComponent(name)
+                var suffix = 2
+                while fileManager.fileExists(atPath: destination.path) {
+                    name = "\(base)-\(suffix).wav"
+                    destination = audioDirectory.appendingPathComponent(name)
+                    suffix += 1
+                    if suffix > 999 { break }
+                }
+                try fileManager.moveItem(at: wav, to: destination)
                 audioField = "audio/\(name)"
             } catch {
                 Log.shared.error("录音归档失败，本条只记文本：\(error)")
@@ -190,7 +202,11 @@ enum Recordings {
         var lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
         var updated = false
 
-        for (index, line) in lines.enumerated() {
+        // 从后往前找：改正总是针对**最近一次**听写。
+        // 原先从头找、找到第一条就 break —— ts 精度只到秒，
+        // 同一秒内的两条记录会撞 ts，于是改正会落到较早的那条上。
+        for index in stride(from: lines.count - 1, through: 0, by: -1) {
+            let line = lines[index]
             guard let data = line.data(using: .utf8),
                   var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   object["ts"] as? String == ts else { continue }
