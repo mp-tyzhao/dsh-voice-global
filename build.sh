@@ -43,7 +43,16 @@ swiftc \
 echo "==> 打包资源"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/sidecar"
-cp "$ROOT/sidecar/server.mjs" "$ROOT/sidecar/cleanup.mjs" "$ROOT/sidecar/llm.mjs" "$APP/Contents/Resources/sidecar/"
+# 拷**所有**非测试的 .mjs，不要手写文件名清单。
+# 原先这里只列了 server/cleanup/llm 三个，后来加的 dictionary、learning、phonetic
+# 全都没被打进去 —— 开发模式下 devSidecarRoot 指向仓库所以看不出来，
+# 打包后学习功能和拼音层会直接失效。这是自测（--learn-selftest）逼出来的。
+for module in "$ROOT"/sidecar/*.mjs; do
+  case "$module" in
+    *.test.mjs) continue ;;
+  esac
+  cp "$module" "$APP/Contents/Resources/sidecar/"
+done
 cp -R "$ROOT/sidecar/node_modules" "$APP/Contents/Resources/sidecar/node_modules"
 
 echo "==> 代码签名"

@@ -70,8 +70,13 @@ echo
 echo "[2/6] 打包 sidecar 与依赖"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/sidecar"
-cp "$ROOT/sidecar/server.mjs" "$ROOT/sidecar/cleanup.mjs" "$ROOT/sidecar/llm.mjs" \
-   "$APP/Contents/Resources/sidecar/"
+# 拷所有非测试的 .mjs（原因同 build.sh：手写清单漏过 dictionary/learning/phonetic）
+for module in "$ROOT"/sidecar/*.mjs; do
+  case "$module" in
+    *.test.mjs) continue ;;
+  esac
+  cp "$module" "$APP/Contents/Resources/sidecar/"
+done
 # 模型下载脚本也随包带上：万一没内置模型，目标机器的 Agent 可以直接跑它
 mkdir -p "$APP/Contents/Resources/setup"
 cp "$ROOT/scripts/fetch-models.mjs" "$APP/Contents/Resources/setup/"

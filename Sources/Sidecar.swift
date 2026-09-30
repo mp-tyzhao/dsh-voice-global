@@ -247,10 +247,18 @@ final class Sidecar {
     ///
     /// 学习逻辑在 `sidecar/learning.mjs` 里（和词表、防编造校验共用同一套对齐代码），
     /// 这里只是起一个短命 node 进程跑它 —— 改正不常发生，不值得为它改协议。
-    func learn(raw: String, corrected: String, config: VoiceConfig, completion: @escaping ([String]) -> Void) {
+    /// 返回 (直接生效的词, 先进待定区的词)。
+    ///
+    /// 待定区必须一起返回 —— 否则用户改完一个词，界面什么都不显示，
+    /// 看起来像功能坏了。实测（--learn-selftest）就是这么发现的：
+    /// 中文单字替换推出来的词置信度 0.60，第一次只进待定区，
+    /// 而当时只返回 added，于是回调永远不触发、HUD 永远不弹。
+    func learn(raw: String, corrected: String, config: VoiceConfig,
+               completion: @escaping (_ added: [String], _ pending: [String]) -> Void) {
         queue.async { [self] in
             var added: [String] = []
-            defer { DispatchQueue.main.async { completion(added) } }
+            var pending: [String] = []
+            defer { DispatchQueue.main.async { completion(added, pending) } }
             do {
                 let node = try resolveNode(config: config)
                 let script = try resolveScript(config: config)
@@ -271,9 +279,9 @@ final class Sidecar {
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
 
-                guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let list = object["added"] as? [String] else { return }
-                added = list
+                guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+                added = object["added"] as? [String] ?? []
+                pending = object["pending"] as? [String] ?? []
             } catch {
                 Log.shared.error("学习失败：\(error)")
             }

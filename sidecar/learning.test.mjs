@@ -102,6 +102,21 @@ console.log('\n— 合并进词表 —');
 }
 
 
+console.log('\n— 术语边界（全部来自真实使用）—');
+{
+  // 边界判错比漏抽更糟：抽成"用户侧自进"，下次就会把正确的"化"截掉
+  const cases = [
+    ['你看用户测自净化这两个词都识别错了', '你看用户侧自进化这两个词都识别错了', '用户侧自进化'],
+    ['这个需求由赵天义负责', '这个需求由赵天翊负责', '赵天翊'],
+    ['下周同步给奇迹创谈', '下周同步给奇绩创坛', '奇绩创坛'],
+    ['我们想一想怎么样能像tys那样吧', '我们想一想怎么样能像Typeless那样', 'Typeless'],
+  ];
+  for (const [raw, corrected, want] of cases) {
+    const got = extractTermNames(raw, corrected);
+    check(`边界正确：${want}`, got.includes(want), `抽到 ${JSON.stringify(got)}`);
+  }
+}
+
 console.log('\n— 明显不是术语的形态（Gboard 过滤器）—');
 {
   const junk = ['hahaha', 'yesss', 'nooo', '好好好', 'abc123'];

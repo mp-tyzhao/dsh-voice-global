@@ -44,8 +44,11 @@ final class EditWatcher {
 
     private let config: VoiceConfig
     private let sidecar: Sidecar
-    /// 学到新词时回调，用来在界面上告诉用户"学到东西了"
-    var onLearned: (([String]) -> Void)?
+    /// 学习有结果时回调：第一个参数是直接生效的词，第二个是先进待定区的词。
+    /// 两者都要告诉用户 —— 不然改完了界面没反应，像是坏了。
+    var onLearned: (([String], [String]) -> Void)?
+    /// 自测时打开，把每次轮询的判断都写进日志
+    var verbose = false
     /// 用户把整段转写改成了什么样 —— 写回语料当标注
     var onCorrection: ((String) -> Void)?
 
@@ -93,16 +96,28 @@ final class EditWatcher {
     // MARK: - 轮询
 
     private func poll() {
+        let trace = { (message: String) in
+            if self.verbose { Log.shared.info("自测轮询：\(message)") }
+        }
         guard Date() < deadline else {
+            trace("超时结束")
             stop()
             return
         }
-        guard let current = EditWatcher.focusedElement(),
-              let now = EditWatcher.value(of: current) else {
+        guard let current = EditWatcher.focusedElement() else {
+            trace("拿不到焦点元素")
             stop()
             return
         }
-        guard now != before else { return }
+        guard let now = EditWatcher.value(of: current) else {
+            trace("焦点元素不提供文本")
+            stop()
+            return
+        }
+        guard now != before else {
+            trace("内容未变（\(now.count) 字）")
+            return
+        }
 
         // 判断"还是不是同一段文本"，而不是"还是不是同一个 AX 元素"。
         //
@@ -112,19 +127,35 @@ final class EditWatcher {
         //
         // 内容判据更稳：原地修改会保留大部分文本，换到别的文档则不会。
         guard EditDiff.isSameDocument(before, now) else {
+            trace("内容已不是同一段（\(before.count) → \(now.count) 字）")
             stop()
             return
         }
-        element = current
+        trace("检测到改动（\(before.count) → \(now.count) 字）")
 
+        // 必须先把两个字符串取出来再 stop()。
+        //
+        // stop() 会把 self.before 清空，而 Swift 的实参是在调用点求值的 ——
+        // 写成 `stop(); handleChange(from: before, to: now)` 的话，
+        // handleChange 拿到的原文是空串，`"".range(of: pasted)` 恒为 nil，
+        // 于是每一次改正都在这里被静默丢掉。
+        //
+        // 这个 bug 从第一版就在：学习闭环从来没有真正抓到过任何一次修改。
+        // 是 --learn-selftest 把它逼出来的 —— 光靠真实使用永远只会看到"没反应"。
+        let previous = before
+        let latest = now
+        element = current
         stop()
-        handleChange(from: before, to: now)
+        handleChange(from: previous, to: latest)
     }
 
     /// 输入框内容变了：确认改动落在我们粘贴的那段里，再交给学习。
     private func handleChange(from old: String, to new: String) {
         // 1. 我们粘的那段得还在（用户可能把它删了，那不算纠正）
-        guard let pastedRange = old.range(of: pasted), !pasted.isEmpty else { return }
+        guard let pastedRange = old.range(of: pasted), !pasted.isEmpty else {
+            if verbose { Log.shared.info("自测轮询：粘贴段已不在新内容里") }
+            return
+        }
 
         // 2. 找出改动的区间
         let (prefix, suffix) = EditDiff.commonEdges(old, new)
@@ -134,7 +165,10 @@ final class EditWatcher {
         let changeEnd = old.index(old.endIndex, offsetBy: -suffix)
         guard changeStart < changeEnd else { return }
         // 改动必须与粘贴段相交，否则是用户在编辑别的地方
-        guard changeStart < pastedRange.upperBound, changeEnd > pastedRange.lowerBound else { return }
+        guard changeStart < pastedRange.upperBound, changeEnd > pastedRange.lowerBound else {
+            if verbose { Log.shared.info("自测轮询：改动不在粘贴段内") }
+            return
+        }
 
         // 3. 取改动点前后一段窗口（带上文，学习模块靠对齐找边界）
         let oldWindow = EditDiff.window(old, prefix: prefix, suffix: suffix)
@@ -152,10 +186,11 @@ final class EditWatcher {
 
         Log.shared.info("学习：检测到用户改正（\(oldWindow.count) → \(newWindow.count) 字）")
 
-        sidecar.learn(raw: oldWindow, corrected: newWindow, config: config) { [weak self] added in
-            guard !added.isEmpty else { return }
-            Log.shared.info("学到新词：\(added.joined(separator: "、"))")
-            self?.onLearned?(added)
+        sidecar.learn(raw: oldWindow, corrected: newWindow, config: config) { [weak self] added, pending in
+            guard !added.isEmpty || !pending.isEmpty else { return }
+            if !added.isEmpty { Log.shared.info("学到新词：\(added.joined(separator: "、"))") }
+            if !pending.isEmpty { Log.shared.info("记住待确认：\(pending.joined(separator: "、"))") }
+            self?.onLearned?(added, pending)
         }
     }
 

@@ -85,7 +85,7 @@ const isUsefulToken = (token) => /[\u4e00-\u9fffA-Za-z]/.test(token);
 /** 单字中文替换时，往前带几个字当上下文（`赵天` + `翼` → `赵天翊`）。 */
 const CJK_CONTEXT = 2;
 /** 抽出来的中文术语最长多少字。 */
-const MAX_CJK_TERM = 4;
+const MAX_CJK_TERM = 6;
 
 /**
  * 常见虚词/功能字。
@@ -165,8 +165,23 @@ export function extractTerms(raw, corrected) {
             before.unshift(token);
           }
           text = before.join('') + text;
-          if (text.length > MAX_CJK_TERM) text = text.slice(-MAX_CJK_TERM);
         }
+        // 往后带：仅当替换跨度不止一个字时才允许。
+        //
+        // 依据来自两个真实案例：
+        //   赵天义 → 赵天翊（单字替换，替换处就是词尾）—— 右扩会带出"负责"，得到"赵天翊负责"
+        //   用户测自净化 → 用户侧自进化（多字合并替换，后面还有匹配的"化"）—— 不右扩就丢掉"化"
+        // 单字替换通常发生在词尾或整词替换；多字替换往往是词内部重构，后面还有内容。
+        if (originalLength > 1) {
+          const after = [];
+          for (let k = group.end + 1; k < correctedTokens.length && after.length < CJK_CONTEXT; k += 1) {
+            const token = correctedTokens[k];
+            if (!/^[\u4e00-\u9fff]$/u.test(token) || isFunctionChar(token)) break;
+            after.push(token);
+          }
+          text += after.join('');
+        }
+        if (text.length > MAX_CJK_TERM) text = text.slice(-MAX_CJK_TERM);
         // 只替换了一个字、而且带上文后尾字仍是虚词 → `那样把`、`识别得`、`比如给`，丢掉
         if (originalLength === 1 && isFunctionChar(text[text.length - 1])) { run = null; return; }
         // 首字是虚词的片段不是术语（`把一些`、`在这个` 这种碎片）
@@ -217,10 +232,12 @@ export function extractTerms(raw, corrected) {
  * 优先用 corrected（用户明确改成的样子），否则用它当时收到的 text。
  */
 export function loadAccepted(limit = 200) {
-  const path = process.env.VOICE_GLOBAL_CORPUS
+  // 变量名不能叫 path —— 会遮蔽顶部导入的 path，触发 TDZ 报错，
+  // 整个 learning.mjs 每次调用都崩。学习功能因此从来没跑起来过。
+  const corpusPath = process.env.VOICE_GLOBAL_CORPUS
     || path.join(os.homedir(), '.voice-global', 'recordings', 'index.jsonl');
   try {
-    return fs.readFileSync(path, 'utf8').split('\n')
+    return fs.readFileSync(corpusPath, 'utf8').split('\n')
       .filter((line) => line.trim())
       .slice(-limit)
       .map((line) => { try { const e = JSON.parse(line); return e.corrected || e.text || ''; } catch { return ''; } })

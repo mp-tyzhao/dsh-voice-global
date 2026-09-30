@@ -52,7 +52,7 @@ final class VoiceController {
     }
 
     /// 把一次（原文，改正后）交给学习模块。手工纠正和输入框观测都走这里。
-    func learn(raw: String, corrected: String, completion: @escaping ([String]) -> Void) {
+    func learn(raw: String, corrected: String, completion: @escaping ([String], [String]) -> Void) {
         sidecar.learn(raw: raw, corrected: corrected, config: config, completion: completion)
     }
     private let hud = HUD()
@@ -70,8 +70,14 @@ final class VoiceController {
 
         // 从用户的手工修改中学习：粘贴后短窗口内观测输入框
         let watcher = EditWatcher(config: config, sidecar: sidecar)
-        watcher.onLearned = { [weak self] terms in
-            self?.hud.flash(title: "学到新词", detail: terms.joined(separator: "、"), seconds: 2.0)
+        watcher.onLearned = { [weak self] added, pending in
+            guard let self else { return }
+            if !added.isEmpty {
+                self.hud.flash(title: "学到新词", detail: added.joined(separator: "、"), seconds: 2.0)
+            } else {
+                // 低置信度的候选先攒着，再见一次才生效 —— 但必须让用户看到有反应
+                self.hud.flash(title: "记住了一个词", detail: "\(pending.joined(separator: "、"))（再见一次就生效）", seconds: 2.4)
+            }
         }
         watcher.onCorrection = { corrected in
             // 写回语料当标注：以后算准确率、做回归都靠这个字段
@@ -599,14 +605,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Recordings.applyCorrection(ts: last.ts, corrected: corrected)
 
         // 2. 学习：用 raw 对照 corrected，抽出用户真正用的词
-        controller?.learn(raw: last.raw, corrected: corrected) { [weak self] added in
+        controller?.learn(raw: last.raw, corrected: corrected) { [weak self] added, pending in
             guard let self else { return }
-            if added.isEmpty {
-                self.showAlert(title: "记下了", body: "这次没有提取到新的专有名词（改动可能只是措辞或标点）。")
-            } else {
+            if !added.isEmpty {
                 self.showAlert(title: "学到 \(added.count) 个词", body: added.joined(separator: "、"))
+            } else if !pending.isEmpty {
+                self.showAlert(
+                    title: "记住了 \(pending.count) 个词",
+                    body: "\(pending.joined(separator: "、"))\n\n它们是单字替换推出来的，边界可能是猜的。再遇到一次就正式生效 —— 想立刻生效可以直接加进词表。"
+                )
+            } else {
+                self.showAlert(title: "记下了", body: "这次没有提取到新的专有名词（改动可能只是措辞或标点）。")
             }
-            Log.shared.info("手工纠正学习：\(added.joined(separator: "、"))")
+            Log.shared.info("手工纠正学习：生效 \(added.joined(separator: "、"))；待确认 \(pending.joined(separator: "、"))")
         }
     }
 
@@ -812,7 +823,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(url)
     }
 
-    @objc private func runCheck() {
+    @objc private 
+func runCheck() {
         let report = Diagnostics.collect(config: controller?.config ?? VoiceConfig())
         showAlert(title: "自检结果", body: report)
     }
@@ -1152,6 +1164,16 @@ if arguments.contains("--check") {
 
 // 学习功能依赖「读得到焦点输入框的文本」。这个命令用来验证某个 App 支不支持：
 // 把光标放进那个 App 的输入框，再跑它。
+if arguments.contains("--learn-selftest") {
+    // 需要一个真正的 GUI 上下文：辅助功能读取、窗口焦点都要它
+    let selfTestApp = NSApplication.shared
+    let selfTestDelegate = LearnSelfTestDelegate()
+    selfTestApp.delegate = selfTestDelegate
+    selfTestApp.setActivationPolicy(.accessory)
+    selfTestApp.run()
+    exit(0)
+}
+
 if arguments.contains("--ax-probe") {
     if !Injector.isTrusted {
         print("❌ 缺少辅助功能权限，读不到任何输入框")
