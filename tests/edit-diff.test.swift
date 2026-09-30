@@ -96,6 +96,33 @@ struct EditDiffTest {
             check("越界返回 nil 而不是崩溃", bad == nil, bad ?? "nil")
         }
 
+        // ---- isSameDocument ----
+        print("\n— 判断是不是同一段文本 —")
+        do {
+            // 原地改几个字：这是我们想抓的情况
+            let before = "你看用户测自净化这两个词都识别错了，这也不是什么特别生僻的字，怎么会这样呢"
+            let after  = "你看用户侧自进化这两个词都识别错了，这也不是什么特别生僻的字，怎么会这样呢"
+            check("原地改字 → 同一段", EditDiff.isSameDocument(before, after))
+        }
+        do {
+            // 换到了完全不同的文档：不该当成纠正
+            let before = "你看用户测自净化这两个词都识别错了"
+            let after  = "明天的会议改到下午三点，记得带上材料"
+            check("换成别的文档 → 不是同一段", !EditDiff.isSameDocument(before, after))
+        }
+        do {
+            let before = "很短的句子"
+            check("同一句没变 → 同一段", EditDiff.isSameDocument(before, before))
+            check("空串 → 不是同一段", !EditDiff.isSameDocument("", "任何内容"))
+        }
+        do {
+            // 长文档里删掉一大段，公共前后缀不多，但仍属同一文档
+            let head = String(repeating: "前", count: 200)
+            let tail = String(repeating: "后", count: 200)
+            check("长文档大段删除 → 仍是同一段",
+                  EditDiff.isSameDocument(head + "中间一大段内容" + tail, head + tail))
+        }
+
         // ---- 端到端：真实场景串起来 ----
         print("\n— 真实场景：用户把 TYS 改成 Typeless —")
         do {

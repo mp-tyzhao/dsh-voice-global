@@ -72,6 +72,16 @@ console.log('\n— 该改的：中文同音字 —');
   }
 }
 
+console.log('\n— 真实案例（用户 2026-10-01 实际遇到的）—');
+{
+  // 说"用户侧自进化"，识别成"用户测自净化"。
+  // 测/侧 完全同音（ce4）；净/进 是 in/ing 模糊音对。
+  const r = applyTerms('你看用户测自净化这两个词都识别错了', ['用户侧自进化']);
+  check('真实案例：用户测自净化 → 用户侧自进化', r.text.includes('用户侧自进化'), r.text);
+  check('相似度 0.933（同音字 1.0 + 模糊音 0.4 平均）',
+    r.applied[0] && r.applied[0].score > 0.9, JSON.stringify(r.applied));
+}
+
 console.log('\n— 该改的：西文整词 —');
 {
   const r = applyTerms('我们用 kubernetess 部署', ['Kubernetes']);

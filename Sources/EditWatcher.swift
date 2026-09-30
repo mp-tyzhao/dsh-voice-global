@@ -23,8 +23,12 @@ import ApplicationServices
 /// - 目标 App 不暴露文本（Electron、终端、部分网页输入框）时**静默放弃**，不影响使用
 /// - **内容不离开本机**：只用来抽术语、写进本地词表
 final class EditWatcher {
-    /// 观测窗口。太短会漏掉"想一会儿再改"，太长会白轮询。
-    private static let watchSeconds: TimeInterval = 25
+    /// 观测窗口。
+    ///
+    /// 25 秒太短了 —— 实测：用户 16:01:02 粘贴，25 秒窗口在 16:01:27 结束，
+    /// 而他 16:01:30 就开始了下一次听写，改动正好落在窗口外。人读完再改需要时间。
+    /// VoiceInk 用的是 60 秒，这里跟它对齐。
+    private static let watchSeconds: TimeInterval = 60
     private static let pollInterval: TimeInterval = 1.2
     /// 输入框内容超过这个长度就不观测。
     /// 每 1.2 秒读一次全文、还要做一次前后缀比较，编辑器里开着几 MB 文档时
@@ -93,13 +97,25 @@ final class EditWatcher {
             stop()
             return
         }
-        // 焦点跑了说明用户在忙别的，不再观测
         guard let current = EditWatcher.focusedElement(),
-              let stillSame = element.map({ CFEqual($0, current) }), stillSame else {
+              let now = EditWatcher.value(of: current) else {
             stop()
             return
         }
-        guard let now = EditWatcher.value(of: current), now != before else { return }
+        guard now != before else { return }
+
+        // 判断"还是不是同一段文本"，而不是"还是不是同一个 AX 元素"。
+        //
+        // 原先用 CFEqual 比元素身份，是个真 bug：很多 App（尤其网页输入框）
+        // 每次交互都会重建 AX 元素 —— 用户一点进文本框准备改，身份就变了，
+        // 观测当场停止，改动永远抓不到。实测就栽在这里。
+        //
+        // 内容判据更稳：原地修改会保留大部分文本，换到别的文档则不会。
+        guard EditDiff.isSameDocument(before, now) else {
+            stop()
+            return
+        }
+        element = current
 
         stop()
         handleChange(from: before, to: now)

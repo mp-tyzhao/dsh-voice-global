@@ -34,6 +34,19 @@ enum EditDiff {
         return String(characters[lower..<upper])
     }
 
+    /// 两段文本"还是不是同一段" —— 原地修改 vs 换到了别的文档。
+    ///
+    /// 用来替代"比较 AX 元素身份"：很多 App 每次交互都会重建 AX 元素，
+    /// 身份判据会让观测在用户刚要点进去改的瞬间就停止。
+    /// 内容判据更稳：原地修改保留大部分文本，换文档则不会。
+    static func isSameDocument(_ before: String, _ after: String) -> Bool {
+        guard !before.isEmpty else { return false }
+        let (prefix, suffix) = commonEdges(before, after)
+        // 门槛取 min(一半长度, 40)：短文本按比例，长文本给足余量
+        // （长文档里改一大段，公共前后缀可能远不到一半）
+        return prefix + suffix >= min(before.count / 2, 40)
+    }
+
     /// 我们粘贴的那一段，在用户改完之后变成了什么样。
     ///
     /// 前缀长度不变，所以只需按总长度差把尾部平移过来。
