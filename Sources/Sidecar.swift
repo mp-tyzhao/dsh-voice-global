@@ -268,6 +268,14 @@ final class Sidecar {
         }
     }
 
+    /// 回扫语料，把历史修订重新学一遍（幂等）。
+    ///
+    /// 实时学习有断点：某次修订发生时如果学习环节失效，那条修订就永远留在
+    /// 语料里再也不会被处理。回扫把语料当成可重复开采的矿，补回丢掉的那些。
+    func mineCorpus(config: VoiceConfig, completion: @escaping ([String: Any]) -> Void) {
+        runLearner(arguments: ["--from-corpus"], config: config, completion: completion)
+    }
+
     /// 从词表删词（撤销学到的词）
     func removeTerms(_ terms: [String], config: VoiceConfig, completion: @escaping ([String]) -> Void) {
         guard !terms.isEmpty else { completion([]); return }

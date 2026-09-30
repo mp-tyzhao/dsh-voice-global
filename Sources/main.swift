@@ -43,6 +43,11 @@ final class VoiceController {
         sidecar.listProfiles(config: config, completion: completion)
     }
 
+    /// 回扫历史修订（RSI：让补回的修订也能进循环）
+    func mineCorpus(completion: @escaping ([String: Any]) -> Void) {
+        sidecar.mineCorpus(config: config, completion: completion)
+    }
+
     /// 词表管理（审查 / 撤销 / 导入）。sidecar 是私有的，对外只开这几个动作。
     func listTerms(completion: @escaping ([[String: Any]]) -> Void) {
         sidecar.listTerms(config: config, completion: completion)
@@ -525,6 +530,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         checkItem.target = self
         learningMenu.addItem(checkItem)
 
+        let mineItem = NSMenuItem(title: "从历史修订中学习", action: #selector(mineHistory), keyEquivalent: "")
+        mineItem.target = self
+        learningMenu.addItem(mineItem)
+
         let reviewItem = NSMenuItem(title: "审查学到的词…", action: #selector(reviewLearned), keyEquivalent: "")
         reviewItem.target = self
         learningMenu.addItem(reviewItem)
@@ -839,6 +848,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         模型目录：\(dir)
         """)
+    }
+
+    /// 从历史修订中学习：把之前因为各种原因没学到的修订补回来。
+    ///
+    /// 实时学习有断点：某次修订发生时如果学习环节失效（sidecar 崩了、
+    /// 置信度不够、或者代码本身有 bug），那条修订就永远留在语料里。
+    /// 回扫把语料当成可重复开采的矿，补回丢掉的那些 —— 这是"人工修订
+    /// 能持续进入自进化循环"的关键一环。
+    @objc private func mineHistory() {
+        guard let controller else { return }
+        controller.mineCorpus { [weak self] result in
+            guard let self else { return }
+            let added = result["added"] as? [String] ?? []
+            let pending = result["pending"] as? [String] ?? []
+            let mined = result["mined"] as? Int ?? 0
+
+            if added.isEmpty && pending.isEmpty {
+                let title = mined > 0 ? "回扫了 \(mined) 条修订" : "没有新的修订可回扫"
+                let body = "已处理过的修订不会重复计入，所以这个操作随时可以跑。\n\n"
+                    + "想让系统学到更多，就在输入框里改掉识别错的词，或用「纠正最近一次…」。"
+                self.showAlert(title: title, body: body)
+                return
+            }
+            var body = ""
+            if !added.isEmpty { body += "已生效：\(added.joined(separator: "、"))\n\n" }
+            if !pending.isEmpty { body += "待确认（再见一次就生效）：\(pending.joined(separator: "、"))" }
+            self.showAlert(title: "从历史修订中学到了 \(added.count + pending.count) 个词", body: body)
+            Log.shared.info("回扫修订：生效 \(added.joined(separator: "、"))；待定 \(pending.joined(separator: "、"))")
+        }
     }
 
     @objc private func openDictionary() {

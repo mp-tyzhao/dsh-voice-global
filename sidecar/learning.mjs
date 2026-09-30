@@ -386,6 +386,19 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   const dictPath = value('--dict')
     || path.join(os.homedir(), '.voice-global', 'dictionary.json');
 
+  // 回扫语料：把历史修订重新学一遍（幂等，可反复跑）
+  if (argv.includes('--from-corpus')) {
+    const base = path.join(os.homedir(), '.voice-global');
+    const result = mineCorpus({
+      dictionaryPath: value('--dict') || path.join(base, 'dictionary.json'),
+      pendingPath: value('--pending') || path.join(base, 'learning-pending.json'),
+      minedPath: value('--mined') || path.join(base, 'learning-mined.json'),
+      corpusPath: process.env.VOICE_GLOBAL_CORPUS || path.join(base, 'recordings', 'index.jsonl'),
+    });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.exit(0);
+  }
+
   // 词表管理：宿主用来做「审查 / 撤销」
   if (argv.includes('--list')) {
     const dictForList = value('--dict') || path.join(os.homedir(), '.voice-global', 'dictionary.json');
@@ -510,4 +523,97 @@ export function blastRadius(term, accepted, limit = 0.2) {
   const total = accepted.filter(Boolean).length;
   const ratio = total ? changed / total : 0;
   return { ratio, samples, safe: total === 0 || ratio <= limit };
+}
+
+/**
+ * 回扫语料，把**所有**历史修订重新学一遍。
+ *
+ * ## 为什么需要这个
+ *
+ * 实时学习有一个断点：某次修订发生时如果学习环节失效（sidecar 崩了、
+ * 置信度不够、词表写不进去、或者代码本身有 bug），那条修订就永远留在
+ * 语料里，再也不会被处理 —— 语料是"事实"，但学习是一次性的。
+ *
+ * 回扫把语料当成**可重复开采的矿**：每次跑都把没处理过的修订过一遍。
+ * 这样：
+ *   · 修好 bug 之后，之前丢掉的修订能补回来
+ *   · 同一条修订不会被重复计入（用 ts 记账，不重复累加待定次数）
+ *   · 随时可跑，幂等
+ *
+ * 这是"语音输入的 RSI"里最关键的一环：人工修订必须能**持续**进入循环，
+ * 而不是只在发生的那一刻有机会。
+ *
+ * @param {object} options
+ * @param {string} options.dictionaryPath
+ * @param {string} options.pendingPath
+ * @param {string} options.minedPath 已开采过的 ts 记账文件
+ * @param {string} [options.corpusPath]
+ * @returns {{scanned:number, mined:number, skipped:number, added:string[], pending:string[], rejected:object[]}}
+ */
+export function mineCorpus(options) {
+  const {
+    dictionaryPath,
+    pendingPath,
+    minedPath,
+    corpusPath = path.join(os.homedir(), '.voice-global', 'recordings', 'index.jsonl'),
+  } = options;
+
+  let mined = {};
+  try { mined = JSON.parse(fs.readFileSync(minedPath, 'utf8')); } catch { /* 首次 */ }
+
+  let entries = [];
+  try {
+    entries = fs.readFileSync(corpusPath, 'utf8').split('\n')
+      .filter((line) => line.trim())
+      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .filter(Boolean);
+  } catch {
+    return { scanned: 0, mined: 0, skipped: 0, added: [], pending: [], rejected: [] };
+  }
+
+  // 反事实回放要看用户认可过的历史文本，这里现取
+  const accepted = entries.map((e) => e.corrected || e.text || '').filter(Boolean);
+
+  const added = [];
+  const pending = [];
+  const promoted = [];
+  const rejected = [];
+  let minedCount = 0;
+  let skipped = 0;
+
+  for (const entry of entries) {
+    const ts = entry.ts;
+    const raw = entry.raw;
+    const corrected = entry.corrected;   // 只有用户实际改过才有
+    if (!ts || !raw || !corrected) { skipped += 1; continue; }
+    if (mined[ts]) { skipped += 1; continue; }   // 开采过就不重复
+
+    const candidates = extractTerms(raw, corrected);
+    if (candidates.length) {
+      const result = learn(dictionaryPath, pendingPath, candidates, accepted);
+      added.push(...result.added);
+      rejected.push(...result.rejected);
+      // 注意：不进 pending 累积数组 —— 后面的条目可能把前面进的提升掉，
+      // 累积会让报告显示一个已经生效的词还"待定"。最后统一读一次实际状态。
+      pending.push(...result.pending);
+      promoted.push(...result.promoted);
+    }
+    mined[ts] = { at: new Date().toISOString(), candidates: candidates.map((c) => c.term) };
+    minedCount += 1;
+  }
+
+  if (minedCount) {
+    try {
+      fs.mkdirSync(path.dirname(minedPath), { recursive: true });
+      fs.writeFileSync(minedPath, `${JSON.stringify(mined, null, 2)}\n`);
+    } catch { /* 记不上就下次再来 */ }
+  }
+
+  // 待定区以磁盘上的最终状态为准 —— 过程累积会误导
+  let finalPending = pending;
+  try {
+    finalPending = Object.keys(JSON.parse(fs.readFileSync(pendingPath, 'utf8')));
+  } catch { /* 读不到就用过程值 */ }
+
+  return { scanned: entries.length, mined: minedCount, skipped, added, promoted, pending: finalPending, rejected };
 }
