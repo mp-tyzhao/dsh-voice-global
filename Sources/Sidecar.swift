@@ -279,7 +279,7 @@ final class Sidecar {
         }
 
         var candidates = ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"]
-        let nvmRoot = NSHomeDirectory() + "/.nvm/versions/node"
+        let nvmRoot = Paths.userHome.appendingPathComponent(".nvm/versions/node").path
         if let versions = try? fileManager.contentsOfDirectory(atPath: nvmRoot) {
             let sorted = versions.sorted { lhs, rhs in
                 lhs.compare(rhs, options: .numeric) == .orderedDescending

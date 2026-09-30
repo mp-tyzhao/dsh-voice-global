@@ -63,11 +63,14 @@ cd voice-global
 | 5 构建 | 生成 `build/DSH Voice.app`，并生成本地签名证书 | 有固定证书就不必反复授权 |
 | 6 提示 | 打印授权步骤与自检命令 | 把这部分转达给用户 |
 
-如果第 3 步提示"没有找到可用模型"且下载失败（网络受限），告诉用户可以用 `HF-Mirror`：
+下载环节会自动**并发探测** HuggingFace 与 HF-Mirror（各 3 秒超时），谁先响应就用谁，所以国内网络通常不需要额外配置。
+如果两个源都不通，可以强制指定一个源：
 
 ```bash
-HF_ENDPOINT=https://hf-mirror.com node scripts/fetch-models.mjs
+node scripts/fetch-models.mjs --source https://hf-mirror.com
 ```
+
+中断的下载可以重跑续传：已通过 SHA-256 校验的文件会跳过，不重复下载。
 
 ## 第 3 步：带着用户过权限（必须由人操作）
 
@@ -136,6 +139,8 @@ APP="build/DSH Voice.app/Contents/MacOS/DSHVoice"
 | 转写正常但没有标点 | 菜单里的清理模式 | 说明在 `rules` 模式；确认 `.env` 里有密钥且 `cleanup=llm` |
 | 润色报错或超时 | 日志里的 `tokens` 行 | 密钥/网络问题；超时会自动退回规则层结果，不影响使用 |
 | 重新构建后要重新授权 | `codesign -d -r- "build/DSH Voice.app"` | 应显示 `certificate leaf = H"…"`；如果是 `cdhash`，说明签名证书没生成，跑 `bash scripts/setup-signing.sh` |
+| 第 2 步提示 npm 安装失败 | 这通常不是问题 | 脚本会自动改从本机 DSH 提取原生库；两者都失败才会真的报错 |
+| 模型下载很慢 | 看脚本打印的"探测结果" | 自动选中 HF-Mirror；也可 `--source` 强制指定，或先在有 DSH 的机器上装好再复用 |
 | 内存占用高 | `ps -o rss= -p $(pgrep -f server.mjs)` | 识别进程常驻约 900MB；`idleUnloadSeconds` 默认 300 秒空闲即释放 |
 
 ## 可选：换模型

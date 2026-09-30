@@ -13,10 +13,37 @@ set -euo pipefail
 
 DIR="$HOME/.voice-global/signing"
 NAME="DSH Voice Local Signing"
-KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+FORCED_KEYCHAIN=""
+
+# 允许指定钥匙串与证书名：便于测试，也方便多环境共存
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --keychain) FORCED_KEYCHAIN="${2:-}"; shift 2 ;;
+    --name) NAME="${2:-}"; shift 2 ;;
+    -h|--help) echo "用法: $0 [--keychain <path>] [--name <证书名>]"; exit 0 ;;
+    *) echo "未知参数：$1" >&2; exit 2 ;;
+  esac
+done
+# 登录钥匙串路径不要写死：默认钥匙串 → 搜索列表 → 常见位置
+if [ -n "$FORCED_KEYCHAIN" ]; then
+  KEYCHAIN="$FORCED_KEYCHAIN"
+else
+  KEYCHAIN="$(security default-keychain -d user 2>/dev/null | tr -d ' \"' || true)"
+  if [ -z "$KEYCHAIN" ] || [ ! -f "$KEYCHAIN" ]; then
+    KEYCHAIN="$(security list-keychains -d user 2>/dev/null | tr -d ' \"' | head -1 || true)"
+  fi
+  if [ -z "$KEYCHAIN" ] || [ ! -f "$KEYCHAIN" ]; then
+    KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+  fi
+fi
 
 mkdir -p "$DIR"
 cd "$DIR"
+
+if [ ! -f "$KEYCHAIN" ]; then
+  echo "✗ 找不到登录钥匙串（${KEYCHAIN}），跳过签名证书创建" >&2
+  exit 1
+fi
 
 if security find-certificate -c "$NAME" "$KEYCHAIN" >/dev/null 2>&1; then
   echo "✓ 签名证书已存在：$NAME"

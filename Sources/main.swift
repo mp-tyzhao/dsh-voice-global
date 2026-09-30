@@ -467,7 +467,7 @@ enum Diagnostics {
         let source: String
         switch modelRoot {
         case ownRoot: source = "自带目录"
-        case "\(NSHomeDirectory())/.dsh/speech-to-text/sensevoice/models": source = "复用 DSH 缓存（未重复下载）"
+        case Paths.userHome.appendingPathComponent(".dsh/speech-to-text/sensevoice/models").path: source = "复用 DSH 缓存（未重复下载）"
         default: source = "自定义路径"
         }
         lines.append("\(mark(FileManager.default.fileExists(atPath: model))) 识别模型（\(source)）：\(model)")

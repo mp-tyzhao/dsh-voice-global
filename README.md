@@ -52,7 +52,7 @@ cd dsh-voice-global
 | 步骤 | 逻辑 |
 | --- | --- |
 | 识别运行库 | 项目里已有 → `npm install` → 从本机已装的 DeepSeek Harness 里提取原生库 |
-| 识别模型 | 自带目录已有 → **原地复用本机 DSH 已下载的语音包（省 228MB 下载）** → 都没有才从 HuggingFace 下载 |
+| 识别模型 | 自带目录已有 → **原地复用本机 DSH 已下载的语音包（省 228MB 下载）** → 都没有才下载；下载前**并发探测 HuggingFace 与 HF-Mirror，谁先响应用谁**，全程 SHA-256 校验 |
 | 润色模型 | 用 `--api-key` 或 `DEEPSEEK_API_KEY` 环境变量；没有就退回纯离线并告诉你怎么申请 |
 
 装完启动：

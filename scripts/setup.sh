@@ -18,6 +18,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+APP="$ROOT/build/DSH Voice.app"
 
 API_KEY=""
 USE_LLM=1
@@ -94,15 +95,16 @@ echo
 echo "[3/6] 识别模型（SenseVoice + Silero VAD）"
 if [ -n "$MODEL_ROOT" ] && [ -f "$MODEL_ROOT/sensevoice-onnx/model.int8.onnx" ]; then
   ok "使用指定的模型目录（不下载）：$MODEL_ROOT"
-elif [ -d "$OWN_MODELS/sensevoice-onnx" ]; then
-  ok "自带目录已就绪：$OWN_MODELS"
-elif [ -f "$DSH_CACHE/sensevoice-onnx/model.int8.onnx" ]; then
+elif node scripts/fetch-models.mjs --own-only >/dev/null 2>&1; then
+  ok "自带目录已就绪（已校验大小与 SHA-256）：$OWN_MODELS"
+elif node scripts/fetch-models.mjs --check >/dev/null 2>&1; then
   ok "发现本机已有的语音包（DSH 下载过），原地复用："
   echo "     $DSH_CACHE"
   echo "     不复制、不下载，省下 228MB 空间与流量"
 else
-  warn "本机没有现成语音包，需要下载（int8 约 231MB）"
-  node scripts/fetch-models.mjs || die "模型下载失败，可手动下载后放到 $OWN_MODELS"
+  warn "本机没有可用的完整语音包，需要下载（int8 约 231MB）"
+  node scripts/fetch-models.mjs || die "模型下载失败：可重跑本脚本续传，或手动下载后放到 $OWN_MODELS
+     也可以用镜像：node scripts/fetch-models.mjs --source https://hf-mirror.com"
 fi
 
 # ── 4. 润色模型 ────────────────────────────────────────────────────────────
@@ -151,13 +153,20 @@ if [ "$SKIP_BUILD" -eq 0 ]; then
   fi
   ./build.sh >/tmp/voice-global-build.log 2>&1 || { tail -20 /tmp/voice-global-build.log; die "构建失败"; }
   ok "已生成 build/DSH Voice.app"
+
+  # 装完立刻自检，把问题暴露在安装阶段而不是用户第一次按 Fn 时
+  echo "  运行自检…"
+  if "$APP/Contents/MacOS/DSHVoice" --check 2>/dev/null | grep -q "识别服务：就绪"; then
+    ok "自检通过：识别服务可用"
+  else
+    warn "自检未通过，请查看上面的输出与 ~/.voice-global/log.txt"
+  fi
 else
   echo
   echo "[5/6] 跳过构建"
 fi
 
 # ── 6. 下一步 ──────────────────────────────────────────────────────────────
-APP="$ROOT/build/DSH Voice.app"
 echo
 echo "[6/6] 接下来"
 cat <<EOF

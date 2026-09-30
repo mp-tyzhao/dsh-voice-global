@@ -12,10 +12,12 @@
  * 用法：
  *   node scripts/fetch-models.mjs              # 智能选择：复用或下载
  *   node scripts/fetch-models.mjs --check      # 只检查（自带目录或 DSH 缓存任一可用即通过）
+ *   node scripts/fetch-models.mjs --own-only   # 只认自带目录（安装脚本用来区分来源）
  *   node scripts/fetch-models.mjs --copy       # 把 DSH 缓存复制进自带目录（独立于 DSH）
  *   node scripts/fetch-models.mjs --download   # 强制下载
  *   node scripts/fetch-models.mjs --out /path  # 指定目录
  *   node scripts/fetch-models.mjs --fp32       # 用 fp32 权重（937MB，更准更慢）
+ *   node scripts/fetch-models.mjs --source https://hf-mirror.com   # 强制指定下载源
  */
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -83,6 +85,36 @@ async function verify(file, spec) {
   return hash.digest('hex') === spec.sha256;
 }
 
+/**
+ * 并发探测各下载源，返回第一个返回 2xx 的源。
+ * DSH 也是这么做的：与其"先试一个、等它超时再换"，不如同时问，谁快用谁。
+ * @param {string} probeUrl - 以官方 HF 地址为准的探测 URL
+ * @param {number} timeoutMs - 单源探测超时（DSH 默认 3000ms）
+ * @returns {Promise<string|null>} 选中的源；全部失败返回 null
+ */
+async function pickSource(probeUrl, timeoutMs = 3000) {
+  const attempts = sources.map(async (base) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(probeUrl.replace(HF, base), {
+        method: 'HEAD',
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return base;
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+  try {
+    return await Promise.any(attempts);
+  } catch {
+    return null;
+  }
+}
+
 /** 带进度地把 URL 下载到临时文件，再原子重命名。 */
 async function download(url, dest, expectedBytes) {
   const response = await fetch(url, { redirect: 'follow' });
@@ -97,7 +129,7 @@ async function download(url, dest, expectedBytes) {
     received += chunk.length;
     if (!out.write(chunk)) await new Promise((resolve) => out.once('drain', resolve));
     const now = Date.now();
-    if (now - lastReport > 1000) {
+    if (now - lastReport > 2000) {
       lastReport = now;
       const percent = ((received / expectedBytes) * 100).toFixed(1);
       process.stdout.write(`\r    ${percent}% (${(received / 1048576).toFixed(0)}MB / ${(expectedBytes / 1048576).toFixed(0)}MB)`);
@@ -161,6 +193,15 @@ async function reuseFromDSH() {
 
 console.log('检查本地模型…');
 const ownReady = await checkExisting(false) && !flag('--download');
+// --own-only：只认自带目录，用于安装脚本区分"自带"与"复用 DSH 缓存"两种情况
+if (flag('--own-only')) {
+  if (ownReady) {
+    console.log(`  ✓ 自带目录模型完整：${outRoot}`);
+    process.exit(0);
+  }
+  console.log(`  ✗ 自带目录不完整：${outRoot}`);
+  process.exit(1);
+}
 if (ownReady) {
   console.log(`  ✓ 自带目录已有完整模型：${outRoot}`);
   console.log(`\n✅ 模型已就绪：${outRoot}`);
@@ -194,9 +235,20 @@ if (flag('--check')) {
   process.exit(1);
 }
 
-const sources = [HF, HF_MIRROR];
+const forcedSource = value('--source', '');
+const sources = forcedSource ? [forcedSource] : [HF, HF_MIRROR];
 const totalBytes = ASSETS.model[precision].bytes + ASSETS.tokens.bytes + ASSETS.vad.bytes;
 console.log(`\n开始下载（约 ${(totalBytes / 1048576).toFixed(0)}MB）`);
+
+// 并发探测，避免"先试一个死源、干等它超时"
+const preferredSource = forcedSource
+  ? forcedSource
+  : await pickSource(ASSETS.model[precision].url, Number(value('--probe-timeout', 3000)));
+if (preferredSource) {
+  console.log(`  探测结果：使用 ${new URL(preferredSource).host}`);
+} else {
+  console.warn('  ! 所有下载源都没能在 3 秒内响应，将按顺序逐个尝试');
+}
 
 for (const target of TARGETS) {
   const spec = target.key === 'model' ? ASSETS.model[precision] : ASSETS[target.key];
@@ -205,7 +257,11 @@ for (const target of TARGETS) {
     continue;
   }
   let done = false;
-  for (const base of sources) {
+  // 优先用探测选出来的源；探测全失败时再按配置顺序逐个尝试
+  const ordered = preferredSource
+    ? [preferredSource, ...sources.filter((base) => base !== preferredSource)]
+    : sources;
+  for (const base of ordered) {
     const url = spec.url.replace(HF, base);
     try {
       console.log(`  ↓ ${target.label}  ← ${new URL(base).host}`);
@@ -227,4 +283,3 @@ for (const target of TARGETS) {
 }
 
 console.log(`\n✅ 模型已就绪：${outRoot}`);
-if (dshAvailable) console.log('（也可以直接复用 DSH 缓存：node scripts/fetch-models.mjs --from-dsh）');

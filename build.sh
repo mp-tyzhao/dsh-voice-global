@@ -50,7 +50,9 @@ echo "==> 代码签名"
 # 优先用本地自签名身份：指定要求是「identifier + 证书」，跨构建稳定，
 # 授权（辅助功能/麦克风）不会因为重新构建而失效。没有证书才退回 ad-hoc。
 SIGN_IDENTITY="DSH Voice Local Signing"
-if security find-certificate -c "$SIGN_IDENTITY" "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1; then
+KEYCHAIN="$(security default-keychain -d user 2>/dev/null | tr -d ' \"' || true)"
+[ -n "$KEYCHAIN" ] && [ -f "$KEYCHAIN" ] || KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+if [ -f "$KEYCHAIN" ] && security find-certificate -c "$SIGN_IDENTITY" "$KEYCHAIN" >/dev/null 2>&1; then
   if codesign --force --deep --sign "$SIGN_IDENTITY" "$APP" >/dev/null 2>&1; then
     echo "   ✓ 已用「${SIGN_IDENTITY}」签名（权限可跨构建保留）"
   else

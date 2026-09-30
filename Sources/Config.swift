@@ -2,11 +2,21 @@ import Foundation
 
 /// 所有用户可见路径：配置、日志、模型、临时音频。
 enum Paths {
+    /// 用户主目录：优先用 $HOME（与安装脚本、Node 保持一致），
+    /// 保证"脚本装到哪里、App 就读哪里"，也便于隔离测试。
+    /// GUI 应用由 launchd 启动时 $HOME 就是真实主目录，行为不变。
+    static let userHome: URL = {
+        if let home = ProcessInfo.processInfo.environment["HOME"], home.hasPrefix("/") {
+            return URL(fileURLWithPath: home, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+    }()
+
     /// 数据目录。老版本用过 ~/.dsh-voice-global，首次启动时自动迁移。
     static let home: URL = {
         let fileManager = FileManager.default
-        let current = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".voice-global", isDirectory: true)
-        let legacy = fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".dsh-voice-global", isDirectory: true)
+        let current = userHome.appendingPathComponent(".voice-global", isDirectory: true)
+        let legacy = userHome.appendingPathComponent(".dsh-voice-global", isDirectory: true)
 
         if !fileManager.fileExists(atPath: current.path), fileManager.fileExists(atPath: legacy.path) {
             do {
@@ -85,7 +95,7 @@ struct VoiceConfig: Codable {
         let fileManager = FileManager.default
         let candidates = [
             Paths.models.path,
-            "\(NSHomeDirectory())/.dsh/speech-to-text/sensevoice/models",
+            Paths.userHome.appendingPathComponent(".dsh/speech-to-text/sensevoice/models").path,
         ]
         for candidate in candidates
         where fileManager.fileExists(atPath: candidate + "/sensevoice-onnx/model.int8.onnx") {
