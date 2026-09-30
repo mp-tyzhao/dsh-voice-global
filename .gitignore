@@ -1,1 +1,24 @@
-# placeholder, replaced by the real tree
+# 构建产物与本地依赖
+build/
+node_modules/
+sidecar/node_modules/
+*.app/
+
+# 本机状态（配置、密钥、日志、录音、签名素材）都不进仓库
+.env
+*.env
+config.json
+*.log
+tmp/
+signing/
+*.p12
+*.pem
+*.key
+
+# macOS
+.DS_Store
+
+# 编辑器
+.idea/
+.vscode/
+*.swp

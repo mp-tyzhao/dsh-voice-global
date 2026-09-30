@@ -1,0 +1,9 @@
+{
+  "name": "voice-global-sidecar",
+  "private": true,
+  "type": "module",
+  "description": "本地转写 sidecar 的依赖声明（sherpa-onnx-node 原生推理）",
+  "dependencies": {
+    "sherpa-onnx-node": "1.13.8"
+  }
+}
