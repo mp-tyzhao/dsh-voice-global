@@ -68,16 +68,57 @@ final class EditWatcher {
             Log.shared.info("学习：当前输入框不提供文本，本次跳过")
             return
         }
-        guard text.count <= EditWatcher.maxWatchedCharacters else {
-            Log.shared.info("学习：输入框内容过长（\(text.count) 字），本次不观测")
-            return
-        }
 
         self.element = focused
-        self.before = text
         self.pasted = pasted
         self.raw = raw
         self.deadline = Date().addingTimeInterval(EditWatcher.watchSeconds)
+
+        // 等粘贴真正落地再定基线。
+        //
+        // ⌘V 是**异步**的：Injector 把按键发出去之后就回调了，此刻目标 App
+        // 往往还没处理完，读到的还是旧值。实测日志里 13 次观测有 11 次读到
+        // 0 或 1 字 —— 拿这个当基线的话，后面每一轮都判不出"还是同一段文本"，
+        // 观测等于白开，学习闭环一次都不会触发。这就是那个根因。
+        settle(initial: text, attempt: 0)
+    }
+
+    /// 轮询等待粘贴落地（文本变得和刚读完时不一样），最多等约 1.8 秒。
+    private func settle(initial: String, attempt: Int) {
+        guard attempt < 12 else {
+            Log.shared.info("学习：粘贴后输入框始终没有变化，本次不观测")
+            stop()
+            return
+        }
+        guard Date() < deadline else { stop(); return }
+        guard let current = EditWatcher.focusedElement(),
+              let text = EditWatcher.value(of: current) else {
+            Log.shared.info("学习：当前输入框不提供文本，本次跳过")
+            stop()
+            return
+        }
+
+        // 落地判据用"变了"，不强求包含完整粘贴内容 —— 有些 App 会做自动格式化
+        // （补全括号、改写引号），逐字比对会永远等不到。
+        //
+        // 另一条 `contains(pasted)` 是给自测留的：那边文本已经在框里了，
+        // 不会有"变化"，只看第一条会一直等到超时。
+        let landed = (!text.isEmpty && text != initial) || text.contains(pasted)
+        guard landed else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.settle(initial: initial, attempt: attempt + 1)
+            }
+            return
+        }
+
+        guard text.count <= EditWatcher.maxWatchedCharacters else {
+            Log.shared.info("学习：输入框内容过长（\(text.count) 字），本次不观测")
+            stop()
+            return
+        }
+
+        self.element = current
+        self.before = text
         Log.shared.info("学习：开始观测输入框（\(text.count) 字），\(Int(EditWatcher.watchSeconds)) 秒内的改动会被学习")
 
         let timer = Timer.scheduledTimer(withTimeInterval: EditWatcher.pollInterval, repeats: true) { [weak self] _ in
