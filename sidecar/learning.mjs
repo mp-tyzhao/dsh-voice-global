@@ -310,11 +310,18 @@ export function mergeTerms(dictionaryPath, newTerms, options = {}) {
   }
 
   if (added.length) {
-    fs.mkdirSync(path.dirname(dictionaryPath), { recursive: true });
-    document.terms = terms;
-    document.origin = origin;
-    document.updatedAt = new Date().toISOString();
-    fs.writeFileSync(dictionaryPath, `${JSON.stringify(document, null, 2)}\n`);
+    // 写不进去不能抛错：词表可能放在只读位置、磁盘可能满。
+    // 抛出去会让整个 learning.mjs 以非零码退出，宿主拿不到 JSON，
+    // 用户看到的是"学习没反应"而不是"词表写不进去"。
+    try {
+      fs.mkdirSync(path.dirname(dictionaryPath), { recursive: true });
+      document.terms = terms;
+      document.origin = origin;
+      document.updatedAt = new Date().toISOString();
+      fs.writeFileSync(dictionaryPath, `${JSON.stringify(document, null, 2)}\n`);
+    } catch (error) {
+      return { added: [], total: terms.length - added.length, dropped, error: String(error.message ?? error) };
+    }
   }
   return { added, total: terms.length, dropped };
 }

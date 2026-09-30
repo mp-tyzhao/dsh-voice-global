@@ -125,12 +125,26 @@ export function stripFabricatedTerms(raw, polished, terms) {
   for (const gap of alignmentGaps(rawTokens, outTokens)) {
     // 原文在这段里什么都没有被换掉 → 这段多出来的内容全是凭空插入
     if (gap.raw.length > 0 || gap.out.length === 0) continue;
-    const joined = gap.out.map(lower).join('');
-    const hit = termTokens.find(({ tokens }) => tokens.join('') === joined);
-    if (!hit) continue;
-    removed.push(hit.term);
-    // 用对齐时记下的下标删除，避免 findIndex 删错位置
-    gap.outIndexes.forEach((index) => dropIndexes.add(index));
+
+    // 在插入段里**滑动查找**词表词，而不是要求整段恰好等于它。
+    //
+    // 原先写的是 `tokens.join('') === gap.out.join('')` —— 只有模型恰好
+    // 只插了这一个词、前后不多不少任何字时才成立。实际模型插入的是
+    // 「加了 Milvus」这种带上下文的片段，整段比对永远不相等，
+    // 于是守卫几乎从不触发。这是真 bug，不是保守。
+    for (const { term, tokens } of termTokens) {
+      const length = tokens.length;
+      for (let start = 0; start + length <= gap.out.length; start += 1) {
+        let matched = true;
+        for (let k = 0; k < length; k += 1) {
+          if (lower(gap.out[start + k]) !== tokens[k]) { matched = false; break; }
+        }
+        if (!matched) continue;
+        removed.push(term);
+        // 用对齐时记下的下标删除，避免 findIndex 删错位置
+        for (let k = 0; k < length; k += 1) dropIndexes.add(gap.outIndexes[start + k]);
+      }
+    }
   }
 
   if (!removed.length) return { text: polished, removed: [] };
@@ -174,7 +188,14 @@ export function loadTerms(path) {
   try {
     const parsed = JSON.parse(fs.readFileSync(path, 'utf8'));
     const terms = Array.isArray(parsed) ? parsed : parsed?.terms;
-    return (terms ?? []).map((t) => String(t).trim()).filter(Boolean);
+    if (!Array.isArray(terms)) return [];
+    // 只收字符串。用 String(t) 强转会把 null 变成 "null"、对象变成
+    // "[object Object]" —— 这些垃圾词会被注入提示、也会进匹配器。
+    // 词表是用户能直接编辑的文件，schema 写错时应该少收而不是收垃圾。
+    return terms
+      .filter((t) => typeof t === 'string')
+      .map((t) => t.trim())
+      .filter(Boolean);
   } catch {
     return [];
   }

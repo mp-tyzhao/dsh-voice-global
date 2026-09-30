@@ -435,7 +435,10 @@ async function handle({ wavPath, language = DEFAULT_LANGUAGE, cleanup = 'rules' 
           // 确定性校验：词表能把 mve 还原成 Milvus，但模型有时会从词表里
           // 挑一个词凭空插进去（实测，且 prompt 里明文禁止也拦不住）。
           // 这里按"这一段原文有没有被换掉的东西"判定，把编造的词撤掉。
-          const guarded = stripFabricatedTerms(raw, text, vocabulary.terms);
+          // 消融开关：守卫到底是在防编造还是在误删正确补全，靠 A/B 量出来
+          const guarded = process.env.VOICE_GLOBAL_NO_FABRICATION_GUARD === '1'
+            ? { text, removed: [] }
+            : stripFabricatedTerms(raw, text, vocabulary.terms);
           if (guarded.removed.length) {
             log(`撤销凭空插入的词表词：${guarded.removed.join('、')}`);
             // 重建文本会丢标点，跑一次规则层补回来

@@ -100,6 +100,7 @@ function runPipeline(wavPath, dictionaryPath) {
     if (dictionaryPath) env.VOICE_GLOBAL_DICTIONARY = dictionaryPath;
     if (NO_GAIN) env.VOICE_GLOBAL_NO_GAIN = '1';
     if (MODEL_DIR) env.VOICE_GLOBAL_MODEL_DIR = MODEL_DIR;
+    if (argv.includes('--no-guard')) env.VOICE_GLOBAL_NO_FABRICATION_GUARD = '1';
     const child = spawn('node', [join(ROOT, 'sidecar', 'server.mjs'), '--once', wavPath, '--cleanup', 'llm'], {
       env, stdio: ['ignore', 'pipe', 'ignore'],
     });

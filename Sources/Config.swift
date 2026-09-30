@@ -181,6 +181,30 @@ struct VoiceConfig: Codable {
         return ("model.int8.onnx", "tokens.txt")
     }
 
+    /// VAD 模型路径。
+    ///
+    /// 和 sidecar 的候选顺序保持一致 —— 两边各算一遍的话，诊断会报假警：
+    /// sidecar 明明能找到 VAD 正常工作，`--check` 却显示 ❌。
+    ///
+    /// VAD 和语音模型是两回事：换语音模型不该把 VAD 一起换掉，
+    /// 所以它不跟着 modelDir 走，而是按几个常见位置依次找。
+    var resolvedVadPath: String {
+        let root = resolvedModelRoot
+        let dir = resolvedModelDir
+        let candidates = [
+            (root as NSString).appendingPathComponent("silero/silero_vad.onnx"),
+            (dir as NSString).appendingPathComponent("silero_vad.onnx"),
+            (dir as NSString).appendingPathComponent("../silero/silero_vad.onnx"),
+            Paths.userHome.appendingPathComponent(".voice-global/models/silero/silero_vad.onnx").path,
+            Paths.userHome.appendingPathComponent(".dsh/speech-to-text/sensevoice/models/silero/silero_vad.onnx").path,
+        ]
+        for candidate in candidates where FileManager.default.fileExists(atPath: candidate) {
+            return candidate
+        }
+        // 都没找到就返回第一个，让诊断显示它并标 ❌ —— 用户才知道该往哪放
+        return candidates[0]
+    }
+
     static var detectedModelRoot: String {
         let fileManager = FileManager.default
         var candidates: [String] = []

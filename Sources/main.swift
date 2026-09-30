@@ -933,7 +933,7 @@ enum Diagnostics {
         let names = config.modelFileNames
         let model = "\(modelDir)/\(names.model)"
         let tokens = "\(modelDir)/\(names.tokens)"
-        let vad = "\(config.resolvedModelRoot)/silero/silero_vad.onnx"
+        let vad = config.resolvedVadPath
 
         func mark(_ condition: Bool) -> String { condition ? "✅" : "❌" }
 
