@@ -70,13 +70,25 @@ final class VoiceController {
 
         // 从用户的手工修改中学习：粘贴后短窗口内观测输入框
         let watcher = EditWatcher(config: config, sidecar: sidecar)
+        // 学到词一定要让用户看见 —— 否则他不知道系统在变聪明，也不知道该不该纠正。
+        // 提示措辞按"用户想知道什么"来写：学到了哪个词、下次会怎么处理。
         watcher.onLearned = { [weak self] added, pending in
             guard let self else { return }
             if !added.isEmpty {
-                self.hud.flash(title: "学到新词", detail: added.joined(separator: "、"), seconds: 2.0)
+                let shown = added.prefix(3).joined(separator: "、")
+                let more = added.count > 3 ? " 等 \(added.count) 个" : ""
+                self.hud.flash(
+                    title: "已记住：\(shown)\(more)",
+                    detail: "下次会照这个写法纠正（菜单 → 学习 → 审查学到的词，可撤销）",
+                    seconds: 3.2
+                )
             } else {
                 // 低置信度的候选先攒着，再见一次才生效 —— 但必须让用户看到有反应
-                self.hud.flash(title: "记住了一个词", detail: "\(pending.joined(separator: "、"))（再见一次就生效）", seconds: 2.4)
+                self.hud.flash(
+                    title: "注意到：\(pending.prefix(2).joined(separator: "、"))",
+                    detail: "再遇到一次就会记住它",
+                    seconds: 3.0
+                )
             }
         }
         watcher.onCorrection = { corrected in
