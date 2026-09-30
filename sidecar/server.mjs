@@ -132,8 +132,23 @@ function loadModels() {
     sileroVad: {
       model: VAD,
       threshold: 0.5,
-      minSilenceDuration: 0.5,
-      minSpeechDuration: 0.25,
+      // 0.5 → 1.0：一句话被从中间切开，尾部会被单独解码。
+      // 实测（用户录音 16:19:44，"…SenseVoice 对吧"）：
+      //   minSilence=0.5 → 尾部「对吧」前有 0.78s 停顿，被切成第二段；
+      //                    单独解码时模型把这一小段猜成了日文「でば」，
+      //                    而主段也受损（「所，现在」）。
+      //   minSilence=1.0 → 合成一段、覆盖到 4.86s，完整识别出
+      //                    「…sense voice，对吧？」。
+      // 听写本来就是短句，停顿合并比切分更有利：上下文更完整，
+      // 短片段猜错语言的问题也一并消失。上限仍由 maxSpeechDuration=30s 兜着。
+      minSilenceDuration: 1.0,
+      // 0.25 → 0.1：轻声的短句会被整段漏掉。
+      // 实测（用户录音 16:19:44）：说"…SenseVoice 对吧"，尾部「对吧」
+      // 只有 -29dB 左右，minSpeech=0.25 时 VAD 完全没检出 —— 段数 1、
+      // 只覆盖到 3.34s / 4.88s，识别结果里就没有「对吧」。
+      // 同一段音频绕过 VAD 整段解码能正确识别出「对吧」，说明模型听得见，
+      // 是分段把它切掉的。降到 0.1 后段数变 2、覆盖到 4.86s，「对吧」回来了。
+      minSpeechDuration: 0.1,
       maxSpeechDuration: 30,
       windowSize: 512,
     },
