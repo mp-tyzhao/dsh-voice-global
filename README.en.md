@@ -15,9 +15,38 @@ Tap Fn ──▶ Record ──▶ Transcribe on-device (SenseVoice) ──▶ Cl
 
 ---
 
-## 🚀 Easiest install: let your agent do it
+## ⬇️ Direct download (recommended — no build required)
 
-Copy the block below **in one piece** and send it to your own coding agent (Codex / Claude Code / Cursor / anything that can run commands):
+**[Download `DSH Voice.zip`](https://github.com/mp-tyzhao/dsh-voice-global/releases/latest)** — about 197MB
+
+The archive bundles the Node runtime and the recognition model, so the person receiving it:
+
+- does **not** need Xcode Command Line Tools
+- does **not** need Node.js
+- does **not** need to download the model (saves 231MB and roughly 8 minutes)
+
+Unzip → drag `DSH Voice.app` into Applications → follow the `README.md` inside the archive.
+You can also **forward the archive straight to your coding agent** and let it follow those instructions.
+
+> ⚠️ The app is not notarized (that needs a $99/year Apple Developer account), so run this once,
+> **before the first launch**:
+>
+> ```bash
+> xattr -dr com.apple.quarantine "/Applications/DSH Voice.app"
+> ```
+>
+> Skip it and macOS shows "Apple cannot verify…" with **no "Open Anyway" button**.
+> Any archive that travelled through WeChat / Feishu / AirDrop / a browser carries the quarantine flag.
+
+Requires **macOS 13+ on Apple silicon**. After installing, you still have to grant three
+permissions yourself in System Settings — see the instructions inside the archive.
+
+---
+
+## 🚀 Or: let your agent install from source
+
+If you'd rather build it yourself, or you need to change the code, copy the block below
+**in one piece** and send it to your own coding agent (Codex / Claude Code / Cursor / anything that can run commands):
 
 ```text
 Please install and configure Voice Global on this macOS machine — a global dictation tool that listens when I tap Fn, transcribes on-device, cleans the text up, and pastes it into the focused app.

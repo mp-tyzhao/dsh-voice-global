@@ -307,7 +307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.controller?.stop()
                 self.showAlert(
                     title: "DSH Voice 未能就绪",
-                    body: message + "\n\n请检查：\n· 系统设置 → 隐私与安全性 → 麦克风\n· 日志：~/.dsh-voice-global/log.txt"
+                    body: message + "\n\n请检查：\n· 系统设置 → 隐私与安全性 → 麦克风\n· 日志：\(Paths.log.path)"
                 )
             }
             self.rebuildMenu(state: .idle)

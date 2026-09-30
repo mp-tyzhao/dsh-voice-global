@@ -15,9 +15,36 @@
 
 ---
 
-## 🚀 最省事的安装方式：让你的 Agent 帮你装
+## ⬇️ 直接下载（推荐，不用自己编译）
 
-把下面这段话**整段复制**，发给你自己的编码 Agent（Codex / Claude Code / Cursor / 任何能执行命令的助手）：
+**[下载 `DSH Voice.zip`](https://github.com/mp-tyzhao/dsh-voice-global/releases/latest)** —— 约 197MB
+
+包内已自带 Node 运行时和识别模型，所以拿到包的人：
+
+- **不需要**装 Xcode Command Line Tools
+- **不需要**装 Node.js
+- **不需要**联网下载模型（省掉 231MB 和约 8 分钟）
+
+解压 → 把 `DSH Voice.app` 拖进「应用程序」→ 按包里的 `README.md` 操作。
+也可以**直接把压缩包丢给你的编码 Agent**，让它照包内说明装。
+
+> ⚠️ 包没有做 Apple 公证（需要 $99/年的开发者账号），所以要在**第一次启动之前**执行一次：
+>
+> ```bash
+> xattr -dr com.apple.quarantine "/Applications/DSH Voice.app"
+> ```
+>
+> 不做的话会弹「Apple 无法验证…是否包含恶意软件」，而且**没有「仍要打开」按钮**。
+> 压缩包经微信 / 飞书 / AirDrop / 浏览器传递都会带上隔离标记，这一步省不掉。
+
+需要 **macOS 13+ 的 Apple 芯片 Mac**。装完还要由本人去「系统设置」勾选三项权限，
+详见包内说明。
+
+---
+
+## 🚀 或者：让你的 Agent 从源码装
+
+如果你更想自己编译，或者需要改代码，把下面这段话**整段复制**，发给你自己的编码 Agent（Codex / Claude Code / Cursor / 任何能执行命令的助手）：
 
 ```text
 请帮我在这台 macOS 上安装并配置好 Voice Global（一个按 Fn 说话、自动转写并粘贴到当前应用的全局听写工具）。
