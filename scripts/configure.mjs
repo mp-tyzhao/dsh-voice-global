@@ -42,6 +42,10 @@ const DEFAULTS = {
   showHUD: true,
   playSounds: true,
   idleUnloadSeconds: 300,
+  // 末尾不留标点：听写多是半句话，补上的句号反而要手动删
+  trimEndPunctuation: true,
+  // 从用户的手工修改中学习术语（"越用越聪明"）
+  learnFromEdits: true,
   // 开发模式（特别版）：指向仓库根，改完 sidecar/*.mjs 不用重新打包
   devSidecarRoot: '',
   devAutoReload: true,
@@ -94,6 +98,10 @@ setIf('--base-url', () => { config.llm.baseURL = value('--base-url'); });
 setIf('--model', () => { config.llm.model = value('--model'); });
 setIf('--api-key-env', () => { config.llm.apiKeyEnv = value('--api-key-env'); });
 setIf('--api-key-command', () => { config.llm.apiKeyCommand = value('--api-key-command'); });
+
+// 末尾标点 / 学习开关
+if (has('--trim-end-punct')) config.trimEndPunctuation = (value('--trim-end-punct') ?? 'true') !== 'false';
+if (has('--learn-from-edits')) config.learnFromEdits = (value('--learn-from-edits') ?? 'true') !== 'false';
 
 // 开发模式：把 sidecar 指向仓库，改完 .mjs 立刻生效
 setIf('--dev-root', () => { config.devSidecarRoot = value('--dev-root') ?? ''; });

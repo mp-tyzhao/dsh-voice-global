@@ -19,6 +19,26 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { alignmentGaps, tokenize } from './dictionary.mjs';
 
+/**
+ * 候选词的置信度。
+ *
+ * 自动生效的线是 0.8 —— 低于它的先进待定区，同样的词再见一次才提升。
+ * 分档依据：边界有多确定。
+ *   - 西文词：词边界天然清楚，且整词被听错很常见        → 0.90
+ *   - 中文整段新词（插入型）：改正侧多出来的完整片段      → 0.85
+ *   - 中文单字替换 + 猜上文：只确定"这个字改了"，
+ *     术语边界靠上下文推，可能推出 `奇绩` 这种碎片        → 0.60，需要再次确认
+ */
+const CONFIDENCE_LATIN = 0.90;
+const CONFIDENCE_CJK_DIRECT = 0.85;
+const CONFIDENCE_CJK_GUESSED = 0.60;
+
+/** 达到这个置信度就直接进词表，低于它先攒着。 */
+export const AUTO_APPLY_CONFIDENCE = 0.8;
+
+/** 待定候选再见几次才提升。 */
+const PENDING_PROMOTE_COUNT = 2;
+
 /** 太短的不收：单字多半是"的/了/在"这类，收进去只会造成误伤。 */
 const MIN_CJK_RUN = 2;
 const MIN_LATIN_LEN = 2;
@@ -94,6 +114,7 @@ export function extractTerms(raw, corrected) {
     const flush = () => {
       if (!run) return;
       let text = run.text;
+      let confidence = 0;
       if (run.kind === 'cjk') {
         const originalLength = text.length;
         // 单字且本身就是虚词 → 这是 `吧→把` 那类虚词修正，不是术语
@@ -112,9 +133,16 @@ export function extractTerms(raw, corrected) {
         }
         // 只替换了一个字、而且带上文后尾字仍是虚词 → `那样把`、`识别得`、`比如给`，丢掉
         if (originalLength === 1 && isFunctionChar(text[text.length - 1])) { run = null; return; }
-        if (text.length >= MIN_CJK_RUN) candidates.push(text);
+        // 首字是虚词的片段不是术语（`把一些`、`在这个` 这种碎片）
+        if (isFunctionChar(text[0])) { run = null; return; }
+        if (text.length >= MIN_CJK_RUN) {
+          // 整段是新词（插入型）比"单字替换 + 猜上文"可靠得多
+          confidence = originalLength >= MIN_CJK_RUN ? CONFIDENCE_CJK_DIRECT : CONFIDENCE_CJK_GUESSED;
+          candidates.push({ term: text, confidence, kind: originalLength >= MIN_CJK_RUN ? 'cjk' : 'cjk-guessed' });
+        }
       } else if (text.length >= MIN_LATIN_LEN) {
-        candidates.push(text);
+        // 西文词边界天然清楚，拼错也很可能整词被听错，置信度最高
+        candidates.push({ term: text, confidence: CONFIDENCE_LATIN, kind: 'latin' });
       }
       run = null;
     };
@@ -128,16 +156,21 @@ export function extractTerms(raw, corrected) {
     flush();
   }
 
-  // 3. 原文里已经有的词不算新术语
+  // 3. 原文里已经有的词不算新术语；同一个词保留置信度最高的那条
   const rawLower = raw.toLowerCase();
-  const seen = new Set();
-  return candidates.filter((term) => {
-    const lower = term.toLowerCase();
-    if (rawLower.includes(lower)) return false;
-    if (seen.has(lower)) return false;
-    seen.add(lower);
-    return true;
-  });
+  const best = new Map();
+  for (const candidate of candidates) {
+    const lower = candidate.term.toLowerCase();
+    if (rawLower.includes(lower)) continue;
+    const existing = best.get(lower);
+    if (!existing || candidate.confidence > existing.confidence) best.set(lower, candidate);
+  }
+  return [...best.values()];
+}
+
+/** 只取词面，供调用方按老接口使用。 */
+export function extractTermNames(raw, corrected) {
+  return extractTerms(raw, corrected).map((c) => c.term);
 }
 
 /**
@@ -149,6 +182,7 @@ export function extractTerms(raw, corrected) {
  * @returns {{added: string[], total: number}}
  */
 export function mergeTerms(dictionaryPath, newTerms) {
+  const names = newTerms.map((t) => (typeof t === 'string' ? t : t.term));
   let document = { terms: [] };
   try {
     const parsed = JSON.parse(fs.readFileSync(dictionaryPath, 'utf8'));
@@ -160,7 +194,7 @@ export function mergeTerms(dictionaryPath, newTerms) {
   const existing = new Set(terms.map((t) => t.toLowerCase()));
 
   const added = [];
-  for (const term of newTerms) {
+  for (const term of names) {
     const clean = String(term).trim();
     if (!clean || existing.has(clean.toLowerCase())) continue;
     existing.add(clean.toLowerCase());
@@ -196,11 +230,70 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   const dictPath = value('--dict')
     || path.join(os.homedir(), '.voice-global', 'dictionary.json');
 
+  const pendingPath = value('--pending')
+    || path.join(os.homedir(), '.voice-global', 'learning-pending.json');
   const candidates = extractTerms(raw, corrected);
   if (argv.includes('--dry')) {
-    process.stdout.write(`${JSON.stringify({ added: [], total: 0, candidates })}\n`);
+    process.stdout.write(`${JSON.stringify({ added: [], pending: [], candidates })}\n`);
   } else {
-    const { added, total } = mergeTerms(dictPath, candidates);
-    process.stdout.write(`${JSON.stringify({ added, total, candidates })}\n`);
+    const { added, pending, promoted } = learn(dictPath, pendingPath, candidates);
+    process.stdout.write(`${JSON.stringify({ added, pending, promoted, candidates })}\n`);
   }
+}
+
+/**
+ * 完整的学习动作：高置信度直接进词表，低置信度先攒着。
+ *
+ * 为什么不一律直接进：中文单字替换的术语边界是**猜**出来的（见 CONFIDENCE_CJK_GUESSED），
+ * 一次就写进词表，猜错了会污染之后每一句话的提示。攒够两次再见，误判概率大幅下降。
+ *
+ * @param {string} dictionaryPath
+ * @param {string} pendingPath
+ * @param {{term: string, confidence: number, kind: string}[]} candidates
+ * @returns {{added: string[], pending: string[], promoted: string[]}}
+ */
+export function learn(dictionaryPath, pendingPath, candidates) {
+  let pending = {};
+  try {
+    pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8'));
+  } catch { /* 首次或坏文件，从空开始 */ }
+
+  const added = [];
+  const promoted = [];
+  const stillPending = [];
+  const toApply = [];
+
+  for (const candidate of candidates) {
+    const term = String(candidate.term ?? candidate).trim();
+    if (!term) continue;
+    const confidence = candidate.confidence ?? 1;
+
+    if (confidence >= AUTO_APPLY_CONFIDENCE) {
+      toApply.push(term);
+      continue;
+    }
+    const record = pending[term] ?? { count: 0, confidence };
+    record.count += 1;
+    record.confidence = Math.max(record.confidence ?? 0, confidence);
+    record.lastSeen = new Date().toISOString();
+    pending[term] = record;
+
+    if (record.count >= PENDING_PROMOTE_COUNT) {
+      toApply.push(term);
+      promoted.push(term);
+      delete pending[term];
+    } else {
+      stillPending.push(term);
+    }
+  }
+
+  if (toApply.length) {
+    const result = mergeTerms(dictionaryPath, toApply);
+    added.push(...result.added);
+  }
+  try {
+    fs.writeFileSync(pendingPath, `${JSON.stringify(pending, null, 2)}\n`);
+  } catch { /* 写不了就算了，不影响主流程 */ }
+
+  return { added, pending: stillPending, promoted };
 }
