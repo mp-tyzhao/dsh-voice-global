@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { learn, extractTerms, blastRadius } from './learning.mjs';
+import { learn, extractTerms, blastRadius, describeTerms, removeTerms, mergeTerms } from './learning.mjs';
 import { applyTerms } from './phonetic.mjs';
 import { loadTerms } from './dictionary.mjs';
 
@@ -148,6 +148,36 @@ console.log('\n— 场景六：反事实回放，挡住过于宽泛的词 —');
   const pending2 = path.join(dir, 'pending2.json');
   const r = learn(dict2, pending2, [{ term: '明田', confidence: 0.95, kind: 'latin' }], accepted);
   check('影响面过大的候选被拒绝', r.rejected.length > 0 && r.added.length === 0, JSON.stringify(r));
+}
+
+
+console.log('\n— 场景七：词表要能看懂、能撤销、能带走 —');
+{
+  const dict3 = path.join(dir, 'dictionary3.json');
+
+  // 三种来源要能区分开：用户手动加的、系统学到的、导入进来的
+  mergeTerms(dict3, ['我的公司'], { addedBy: 'manual' });
+  mergeTerms(dict3, [{ term: 'Milvus', confidence: 0.9, kind: 'latin' }], { addedBy: 'learned' });
+  mergeTerms(dict3, ['从别处导入的'], { addedBy: 'manual' });
+
+  const described = describeTerms(dict3);
+  const byTerm = Object.fromEntries(described.map((d) => [d.term, d]));
+  check('能看出哪些是系统学到的', byTerm['Milvus']?.addedBy === 'learned', JSON.stringify(described));
+  check('手动加的不会被误标成学到的', byTerm['我的公司']?.addedBy === 'manual', JSON.stringify(described));
+  check('学到的词带置信度', byTerm['Milvus']?.confidence === 0.9, JSON.stringify(byTerm['Milvus']));
+
+  // 撤销：删掉学到的词，手动加的必须留着
+  const { removed } = removeTerms(dict3, ['Milvus']);
+  check('撤销学到的词', removed.includes('Milvus'), JSON.stringify(removed));
+  const after = describeTerms(dict3).map((d) => d.term);
+  check('手动加的词不受影响', after.includes('我的公司'), JSON.stringify(after));
+  check('撤销的词真的没了', !after.includes('Milvus'), JSON.stringify(after));
+
+  // 导入是合并，不是覆盖
+  mergeTerms(dict3, ['我的公司', '新来的'], { addedBy: 'manual' });
+  const merged = describeTerms(dict3).map((d) => d.term);
+  check('导入按词合并，不覆盖也不重复',
+    merged.filter((t) => t === '我的公司').length === 1 && merged.includes('新来的'), JSON.stringify(merged));
 }
 
 fs.rmSync(dir, { recursive: true, force: true });

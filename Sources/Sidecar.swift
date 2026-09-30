@@ -186,6 +186,63 @@ final class Sidecar {
         }
     }
 
+    /// 跑一次 learning.mjs，返回它打印的 JSON。词表管理（列出 / 删除 / 合并）都走这里。
+    func runLearner(arguments: [String], config: VoiceConfig, completion: @escaping ([String: Any]) -> Void) {
+        queue.async { [self] in
+            var result: [String: Any] = [:]
+            defer { DispatchQueue.main.async { completion(result) } }
+            do {
+                let node = try resolveNode(config: config)
+                let script = try resolveScript(config: config)
+                let learner = script.deletingLastPathComponent().appendingPathComponent("learning.mjs")
+                guard FileManager.default.fileExists(atPath: learner.path) else { return }
+
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: node)
+                process.arguments = [learner.path] + arguments
+                var environment = ProcessInfo.processInfo.environment
+                environment["HOME"] = Paths.userHome.path
+                process.environment = environment
+
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = FileHandle.nullDevice
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+
+                if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    result = object
+                }
+            } catch {
+                Log.shared.error("词表操作失败：\(error)")
+            }
+        }
+    }
+
+    /// 读词表（带来源标记），给「审查学到的词」用
+    func listTerms(config: VoiceConfig, completion: @escaping ([[String: Any]]) -> Void) {
+        runLearner(arguments: ["--list"], config: config) { object in
+            completion(object["terms"] as? [[String: Any]] ?? [])
+        }
+    }
+
+    /// 从词表删词（撤销学到的词）
+    func removeTerms(_ terms: [String], config: VoiceConfig, completion: @escaping ([String]) -> Void) {
+        guard !terms.isEmpty else { completion([]); return }
+        runLearner(arguments: ["--remove", terms.joined(separator: ",")], config: config) { object in
+            completion(object["removed"] as? [String] ?? [])
+        }
+    }
+
+    /// 按词合并进词表（导入）
+    func mergeTerms(_ terms: [String], config: VoiceConfig, completion: @escaping ([String]) -> Void) {
+        guard !terms.isEmpty else { completion([]); return }
+        runLearner(arguments: ["--merge", terms.joined(separator: "\n")], config: config) { object in
+            completion(object["added"] as? [String] ?? [])
+        }
+    }
+
     /// 把一次「用户改正」交给学习脚本，返回这次新学到的词。
     ///
     /// 学习逻辑在 `sidecar/learning.mjs` 里（和词表、防编造校验共用同一套对齐代码），

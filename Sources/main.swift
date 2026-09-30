@@ -38,6 +38,19 @@ final class VoiceController {
     /// 观测用户对转写结果的手工修改（"越用越聪明"的信号源）
     private var editWatcher: EditWatcher?
 
+    /// 词表管理（审查 / 撤销 / 导入）。sidecar 是私有的，对外只开这几个动作。
+    func listTerms(completion: @escaping ([[String: Any]]) -> Void) {
+        sidecar.listTerms(config: config, completion: completion)
+    }
+
+    func removeTerms(_ terms: [String], completion: @escaping ([String]) -> Void) {
+        sidecar.removeTerms(terms, config: config, completion: completion)
+    }
+
+    func mergeTerms(_ terms: [String], completion: @escaping ([String]) -> Void) {
+        sidecar.mergeTerms(terms, config: config, completion: completion)
+    }
+
     /// 把一次（原文，改正后）交给学习模块。手工纠正和输入框观测都走这里。
     func learn(raw: String, corrected: String, completion: @escaping ([String]) -> Void) {
         sidecar.learn(raw: raw, corrected: corrected, config: config, completion: completion)
@@ -480,6 +493,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         checkItem.target = self
         learningMenu.addItem(checkItem)
 
+        let reviewItem = NSMenuItem(title: "审查学到的词…", action: #selector(reviewLearned), keyEquivalent: "")
+        reviewItem.target = self
+        learningMenu.addItem(reviewItem)
+
+        let exportItem = NSMenuItem(title: "导出词表…", action: #selector(exportDictionary), keyEquivalent: "")
+        exportItem.target = self
+        learningMenu.addItem(exportItem)
+
+        let importItem = NSMenuItem(title: "导入词表…", action: #selector(importDictionary), keyEquivalent: "")
+        importItem.target = self
+        learningMenu.addItem(importItem)
+
         let dictItem = NSMenuItem(title: "打开我的词表…", action: #selector(openDictionary), keyEquivalent: "")
         dictItem.target = self
         learningMenu.addItem(dictItem)
@@ -626,6 +651,103 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
                 改用菜单里的「纠正最近一次…」，手改一次同样能学到词。
                 """
+            )
+        }
+    }
+
+    /// 审查学到的词：只列系统自动学到的，删掉哪行就撤销哪个词。
+    ///
+    /// 调研里反复出现的一条：用户要能一眼看出哪些是系统自作主张加的。
+    /// Typeless 用「Auto-added / Manually-added」两个桶，VoiceInk 用四种审查动作 ——
+    /// 共同点是**必须能看懂、能撤销**，否则用户不敢让它继续学。
+    @objc private func reviewLearned() {
+        guard let controller else { return }
+        controller.listTerms { [weak self] entries in
+            guard let self else { return }
+            let learned = entries.filter { ($0["addedBy"] as? String) == "learned" }
+            guard !learned.isEmpty else {
+                self.showAlert(
+                    title: "还没有自动学到的词",
+                    body: """
+                    你在输入框里改掉识别错的字之后，改动会被学到，然后出现在这里。
+
+                    当前词表里的 \(entries.count) 个词都是手动添加的。
+                    """
+                )
+                return
+            }
+
+            let alert = NSAlert()
+            alert.messageText = "审查学到的词（\(learned.count) 个）"
+            alert.informativeText = "这些是从你的手工修改里学来的。删掉哪一行，就撤销哪个词。"
+            alert.addButton(withTitle: "保存")
+            alert.addButton(withTitle: "取消")
+
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 200))
+            let editor = NSTextView(frame: scroll.bounds)
+            editor.string = learned.map { $0["term"] as? String ?? "" }.joined(separator: "\n")
+            editor.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+            editor.isRichText = false
+            scroll.documentView = editor
+            scroll.hasVerticalScroller = true
+            scroll.borderType = .bezelBorder
+            alert.accessoryView = scroll
+
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+            let kept = Set(
+                editor.string.split(separator: "\n")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+            )
+            let removed = learned.compactMap { $0["term"] as? String }.filter { !kept.contains($0) }
+            guard !removed.isEmpty else { return }
+
+            controller.removeTerms(removed) { gone in
+                self.showAlert(title: "已撤销 \(gone.count) 个词", body: gone.joined(separator: "、"))
+                Log.shared.info("撤销学到的词：\(gone.joined(separator: "、"))")
+            }
+        }
+    }
+
+    /// 导出词表（调研把"可导出"列为无人占住的组合的一部分）
+    @objc private func exportDictionary() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "voice-global-词表.json"
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try FileManager.default.copyItem(at: Paths.dictionary, to: url)
+            showAlert(title: "已导出", body: url.path)
+        } catch {
+            // 目标已存在时 copyItem 会失败，改用覆盖写
+            if let data = try? Data(contentsOf: Paths.dictionary) {
+                try? data.write(to: url)
+                showAlert(title: "已导出", body: url.path)
+            } else {
+                showAlert(title: "导出失败", body: "\(error)")
+            }
+        }
+    }
+
+    /// 导入词表：按词合并，不覆盖现有词
+    @objc private func importDictionary() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url, let controller else { return }
+        guard let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let incoming = object["terms"] as? [String], !incoming.isEmpty else {
+            showAlert(title: "这个文件里没有词表", body: "需要是含 terms 数组的 JSON（本 App 导出的格式）。")
+            return
+        }
+
+        controller.mergeTerms(incoming) { added in
+            self.showAlert(
+                title: added.isEmpty ? "没有新词" : "导入 \(added.count) 个词",
+                body: added.isEmpty ? "这些词原本就在词表里。" : added.joined(separator: "、")
             )
         }
     }

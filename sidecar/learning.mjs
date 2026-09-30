@@ -243,8 +243,26 @@ export function extractTermNames(raw, corrected) {
  * @param {string[]} newTerms
  * @returns {{added: string[], total: number}}
  */
-export function mergeTerms(dictionaryPath, newTerms) {
+/**
+ * 往词表里加词，并记下**这个词是怎么来的**。
+ *
+ * 区分「我自己加的」和「系统学到的」是调研里反复出现的一条：
+ * Typeless 用 Auto-added / Manually-added 两个桶，报告原文说
+ * "One enum field; it is the entire trust solution."
+ *
+ * 用户要能一眼看出哪些是系统自作主张加的，才能放心让它继续学。
+ * 字段放在 origin 里，terms 本身仍是纯字符串数组 —— 老代码读 terms 不受影响。
+ *
+ * @param {string} dictionaryPath
+ * @param {Array<string|{term: string, confidence?: number, kind?: string}>} newTerms
+ * @param {{addedBy?: string}} [options]
+ */
+export function mergeTerms(dictionaryPath, newTerms, options = {}) {
+  const addedBy = options.addedBy ?? 'learned';
   const names = newTerms.map((t) => (typeof t === 'string' ? t : t.term));
+  const meta = new Map(
+    newTerms.filter((t) => typeof t !== 'string').map((t) => [t.term, t]),
+  );
   let document = { terms: [] };
   try {
     const parsed = JSON.parse(fs.readFileSync(dictionaryPath, 'utf8'));
@@ -254,9 +272,10 @@ export function mergeTerms(dictionaryPath, newTerms) {
   }
   const terms = Array.isArray(document.terms) ? document.terms.map(String) : [];
   const existing = new Set(terms.map((t) => t.toLowerCase()));
+  const origin = (document.origin && typeof document.origin === 'object') ? document.origin : {};
 
   const added = [];
-  const existingCount = existing.length;
+  const existingCount = existing.size;
   let dropped = 0;
   for (const term of names) {
     if (existingCount + added.length >= MAX_TERMS) { dropped += 1; continue; }
@@ -265,15 +284,63 @@ export function mergeTerms(dictionaryPath, newTerms) {
     existing.add(clean.toLowerCase());
     terms.push(clean);
     added.push(clean);
+    const detail = meta.get(term);
+    origin[clean] = {
+      addedBy,
+      at: new Date().toISOString(),
+      ...(detail?.confidence !== undefined ? { confidence: detail.confidence } : {}),
+    };
   }
 
   if (added.length) {
     fs.mkdirSync(path.dirname(dictionaryPath), { recursive: true });
     document.terms = terms;
+    document.origin = origin;
     document.updatedAt = new Date().toISOString();
     fs.writeFileSync(dictionaryPath, `${JSON.stringify(document, null, 2)}\n`);
   }
-  return { added, total: terms.length };
+  return { added, total: terms.length, dropped };
+}
+
+/**
+ * 读词表及其来源，给"审查/撤销"界面用。
+ * @param {string} dictionaryPath
+ * @returns {{term: string, addedBy: string, at?: string, confidence?: number}[]}
+ */
+export function describeTerms(dictionaryPath) {
+  let document = { terms: [] };
+  try {
+    const parsed = JSON.parse(fs.readFileSync(dictionaryPath, 'utf8'));
+    document = Array.isArray(parsed) ? { terms: parsed } : parsed;
+  } catch { return []; }
+  const origin = (document.origin && typeof document.origin === 'object') ? document.origin : {};
+  return (Array.isArray(document.terms) ? document.terms : []).map((term) => ({
+    term: String(term),
+    // 没记来源的一律当手动加的 —— 宁可不误报"系统加的"
+    addedBy: origin[term]?.addedBy ?? 'manual',
+    at: origin[term]?.at,
+    confidence: origin[term]?.confidence,
+  }));
+}
+
+/** 从词表里删词（撤销学到的词）。 */
+export function removeTerms(dictionaryPath, terms) {
+  let document = { terms: [] };
+  try {
+    const parsed = JSON.parse(fs.readFileSync(dictionaryPath, 'utf8'));
+    document = Array.isArray(parsed) ? { terms: parsed } : parsed;
+  } catch { return { removed: [] }; }
+  const drop = new Set(terms.map((t) => String(t).toLowerCase()));
+  const before = Array.isArray(document.terms) ? document.terms.map(String) : [];
+  const kept = before.filter((t) => !drop.has(t.toLowerCase()));
+  const origin = (document.origin && typeof document.origin === 'object') ? document.origin : {};
+  for (const term of before) if (drop.has(term.toLowerCase())) delete origin[term];
+  document.terms = kept;
+  document.origin = origin;
+  document.updatedAt = new Date().toISOString();
+  fs.mkdirSync(path.dirname(dictionaryPath), { recursive: true });
+  fs.writeFileSync(dictionaryPath, `${JSON.stringify(document, null, 2)}\n`);
+  return { removed: before.filter((t) => drop.has(t.toLowerCase())) };
 }
 
 /**
@@ -294,6 +361,26 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   const corrected = value('--corrected') ?? '';
   const dictPath = value('--dict')
     || path.join(os.homedir(), '.voice-global', 'dictionary.json');
+
+  // 词表管理：宿主用来做「审查 / 撤销」
+  if (argv.includes('--list')) {
+    const dictForList = value('--dict') || path.join(os.homedir(), '.voice-global', 'dictionary.json');
+    process.stdout.write(`${JSON.stringify({ terms: describeTerms(dictForList) })}\n`);
+    process.exit(0);
+  }
+  if (argv.includes('--merge')) {
+    const dictForMerge = value('--dict') || path.join(os.homedir(), '.voice-global', 'dictionary.json');
+    const incoming = (value('--merge') || '').split('\n').map((t) => t.trim()).filter(Boolean);
+    // 导入的词算手动添加 —— 是用户主动带进来的，不是系统猜的
+    process.stdout.write(`${JSON.stringify(mergeTerms(dictForMerge, incoming, { addedBy: 'manual' }))}\n`);
+    process.exit(0);
+  }
+  if (argv.includes('--remove')) {
+    const dictForRemove = value('--dict') || path.join(os.homedir(), '.voice-global', 'dictionary.json');
+    const targets = (value('--remove') || '').split(',').map((t) => t.trim()).filter(Boolean);
+    process.stdout.write(`${JSON.stringify(removeTerms(dictForRemove, targets))}\n`);
+    process.exit(0);
+  }
 
   const pendingPath = value('--pending')
     || path.join(os.homedir(), '.voice-global', 'learning-pending.json');
