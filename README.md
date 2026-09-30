@@ -200,10 +200,13 @@ APP="build/DSH Voice.app/Contents/MacOS/DSHVoice"
 "$APP" --selftest 5         # 录 5 秒并输出转写 JSON
 "$APP" --cycle-test a.wav 3 # 启动→转写→卸载→重启 压测
 node sidecar/cleanup.test.mjs   # 规则清理单测
+swiftc -O -o /tmp/single-instance-test Sources/SingleInstance.swift tests/single-instance.test.swift \
+  && /tmp/single-instance-test  # 单实例保护单测
 ```
 
 | 症状 | 处理 |
 | --- | --- |
+| 说一句话却被录入两遍 | 有两份 App 同时在跑。新版本会自己拦住并弹窗告诉你另一份在哪；旧版本请手动 `ps aux \| grep DSHVoice` 找出多余那份并退出 |
 | 按 Fn 没反应 | 开「输入监控」；确认「按下 🌐 键时」= 不执行任何操作；用 `--listen` 确认 |
 | 能转写但不粘贴 | 辅助功能权限没给；文字此时会留在剪贴板，手动 ⌘V 可用 |
 | 提示"没听清" | 正常行为：没有有效语音就不粘贴任何东西 |
@@ -213,10 +216,41 @@ node sidecar/cleanup.test.mjs   # 规则清理单测
 
 日志：`~/.voice-global/log.txt`（每次听写会记录耗时与 token 用量）。
 
+## 发给别人用
+
+如果你的朋友不想自己编译，可以直接给他们一个压缩包：**包内已自带 Node 运行时和识别模型**
+（官方 Node 二进制只依赖系统库，可以整个搬进 bundle）。对方不需要装 Xcode、不需要装 Node、
+也不需要下载模型。
+
+```bash
+./scripts/package.sh              # → dist/DSH Voice.zip（约 197MB）
+./scripts/package.sh --no-model   # 不内置模型，包小很多，但对方首次要自己下 231MB
+```
+
+压缩包里带一份《安装说明.md》，对方照做即可，也可以直接把说明丢给他的 Agent。
+
+**有一个坑必须提醒对方**：压缩包如果是从微信 / 飞书 / AirDrop / 浏览器收到的，macOS 会给它
+打上隔离标记，直接打开只会弹「Apple 无法验证…是否包含恶意软件」，而且**没有「仍要打开」按钮**。
+所以装完 App 后要先跑一次：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/DSH Voice.app"
+```
+
+这条命令要在**第一次启动之前**执行 —— App 已经在运行时，它所在的 bundle 会被系统锁住，
+命令会报 `Operation not permitted`（这是实测行为，不是权限没给够）。
+
+> 分发包没有做 Apple 公证（那需要 $99/年的开发者账号），所以这步 `xattr` 省不掉。
+> 好在对方本来就要去「系统设置」里勾三项权限，多一条命令不算额外负担。
+>
+> 签名用的是本机证书，**换证书会让老用户的系统授权失效**，所以请沿用
+> `scripts/setup-signing.sh` 生成的那一张，不要随手重建。
+
 ## 目录结构
 
 ```
 Sources/                   Swift 宿主（热键 / 录音 / HUD / 注入 / 配置）
+  SingleInstance.swift     单实例保护（文件锁，防止两份 App 同时监听 Fn）
 sidecar/                   Node 转写服务
   server.mjs               SenseVoice 推理 + 协议
   cleanup.mjs              规则清理（可独立单测）
@@ -227,6 +261,10 @@ scripts/
   configure.mjs            配置读写（密钥与配置分离）
   stage-deps.mjs           从本机 DSH 提取 sherpa-onnx 原生库
   setup-signing.sh         生成本地签名证书（避免反复授权）
+  package.sh               打「发出去就能用」的分发包（内置 Node 与模型）
+  dist-readme.md           随分发包一起发出的《安装说明》
+tests/
+  single-instance.test.swift  单实例保护单测
 docs/agent-setup.md        给 AI Agent 的安装引导
 bench/cost.mjs             成本复现脚本
 ```

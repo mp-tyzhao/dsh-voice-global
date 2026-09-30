@@ -271,11 +271,16 @@ final class Sidecar {
         DispatchQueue.main.async { completion(result) }
     }
 
-    /// 找 node：配置优先，其次常见安装位置，最后问一次登录 shell。
+    /// 找 node：配置优先，其次应用包内自带的运行时，再次常见安装位置，最后问一次登录 shell。
     private func resolveNode(config: VoiceConfig) throws -> String {
         let fileManager = FileManager.default
         if !config.nodePath.isEmpty, fileManager.isExecutableFile(atPath: config.nodePath) {
             return config.nodePath
+        }
+
+        // 打包分发版自带 Node（scripts/package.sh 放入），有它就不依赖用户装过 Node
+        if let bundled = Paths.bundledNode {
+            return bundled
         }
 
         var candidates = ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"]

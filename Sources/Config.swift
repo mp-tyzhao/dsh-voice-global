@@ -37,6 +37,26 @@ enum Paths {
     /// 密钥文件（0600）：`KEY=value` 形式，避免把密钥写进可分享的 config.json。
     static var envFile: URL { home.appendingPathComponent(".env") }
     static var models: URL { home.appendingPathComponent("models", isDirectory: true) }
+
+    /// 应用包内资源目录。打包分发时把 Node 运行时与识别模型放进这里，
+    /// 目标机器就不用自己装 Node、也不用首次下载 231MB 模型。
+    /// 直接从源码编译来跑（未打包）时这些目录不存在，行为与以前完全一致。
+    static var bundledResources: URL? { Bundle.main.resourceURL }
+
+    /// 包内自带的 Node 可执行文件（由 scripts/package.sh 放入）。
+    static var bundledNode: String? {
+        guard let path = bundledResources?.appendingPathComponent("node/bin/node").path,
+              FileManager.default.isExecutableFile(atPath: path) else { return nil }
+        return path
+    }
+
+    /// 包内自带的识别模型根目录。
+    static var bundledModelRoot: String? {
+        guard let path = bundledResources?.appendingPathComponent("models").path,
+              FileManager.default.fileExists(atPath: path + "/sensevoice-onnx/model.int8.onnx") else { return nil }
+        return path
+    }
+
     static var tmp: URL {
         let url = home.appendingPathComponent("tmp", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -90,13 +110,13 @@ struct VoiceConfig: Codable {
 
     var llm = LLMConfig()
 
-    /// 本机检测到的可用模型目录（自带的优先，其次复用 DSH 已下载的缓存）。
+    /// 本机检测到的可用模型目录（包内自带的优先，其次自己下的，最后复用 DSH 已下载的缓存）。
     static var detectedModelRoot: String {
         let fileManager = FileManager.default
-        let candidates = [
-            Paths.models.path,
-            Paths.userHome.appendingPathComponent(".dsh/speech-to-text/sensevoice/models").path,
-        ]
+        var candidates: [String] = []
+        if let bundled = Paths.bundledModelRoot { candidates.append(bundled) }
+        candidates.append(Paths.models.path)
+        candidates.append(Paths.userHome.appendingPathComponent(".dsh/speech-to-text/sensevoice/models").path)
         for candidate in candidates
         where fileManager.fileExists(atPath: candidate + "/sensevoice-onnx/model.int8.onnx") {
             return candidate

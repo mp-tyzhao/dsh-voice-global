@@ -1,5 +1,6 @@
 # 构建产物与本地依赖
 build/
+dist/
 node_modules/
 sidecar/node_modules/
 sidecar/package-lock.json

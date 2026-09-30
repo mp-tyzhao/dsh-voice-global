@@ -262,6 +262,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var permissionTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 单实例保护必须放在最前面：两份 App 同时跑会各自监听 Fn、各自粘贴一次，
+        // 用户看到的就是"每句话被录入两遍"。放在这里也意味着重复实例在安装任何
+        // 监听之前就退出了，不会污染正在运行的那一份。
+        let lockPath = Paths.home.appendingPathComponent("instance.lock").path
+        guard SingleInstance.acquire(lockPath: lockPath) else {
+            let other = SingleInstance.otherInstance()
+            Log.shared.info("已有另一个实例在运行（pid=\(other?.processIdentifier ?? -1)），本实例直接退出，避免重复粘贴")
+            other?.activate()
+            showAlert(
+                title: "DSH Voice 已经在运行",
+                body: """
+                检测到另一个 DSH Voice 正在运行：
+                \(other?.bundleURL?.path ?? "（位置未知）")
+
+                两份同时运行会让每一句话都被录入两遍。请只保留一份
+                （建议保留「应用程序」里的那份），关掉另一份后重新打开。
+                """
+            )
+            exit(0)
+        }
+
         let config = ConfigStore.load()
         let controller = VoiceController(config: config)
         self.controller = controller
@@ -462,10 +483,11 @@ enum Diagnostics {
         lines.append("\(mark(Injector.isTrusted)) 辅助功能权限（模拟 ⌘V 必需）：\(Injector.isTrusted ? "已授权" : "未授权")")
         lines.append("ℹ️ 若 --listen 收不到 Fn 事件，还需在「输入监控」里勾选本应用")
 
-        // 模型来源：让用户/Agent 一眼看出是"复用已有"还是"需要下载"
+        // 模型来源：让用户/Agent 一眼看出是"随包自带"还是"复用已有"还是"需要下载"
         let ownRoot = Paths.models.path
         let source: String
         switch modelRoot {
+        case let root where root == Paths.bundledModelRoot: source = "随应用包自带"
         case ownRoot: source = "自带目录"
         case Paths.userHome.appendingPathComponent(".dsh/speech-to-text/sensevoice/models").path: source = "复用 DSH 缓存（未重复下载）"
         default: source = "自定义路径"
