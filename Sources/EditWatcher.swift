@@ -29,7 +29,7 @@ final class EditWatcher {
     /// 输入框内容超过这个长度就不观测。
     /// 每 1.2 秒读一次全文、还要做一次前后缀比较，编辑器里开着几 MB 文档时
     /// 这个开销不划算；而且那么长的文本里用户改了几个字，本来也不是听写纠正。
-    private static let maxWatchedCharacters = 20_000
+    static let maxWatchedCharacters = 20_000
 
     private var timer: Timer?
     private var element: AXUIElement?

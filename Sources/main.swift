@@ -476,6 +476,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         correctItem.target = self
         learningMenu.addItem(correctItem)
 
+        let checkItem = NSMenuItem(title: "检查学习功能…", action: #selector(checkLearning), keyEquivalent: "")
+        checkItem.target = self
+        learningMenu.addItem(checkItem)
+
         let dictItem = NSMenuItem(title: "打开我的词表…", action: #selector(openDictionary), keyEquivalent: "")
         dictItem.target = self
         learningMenu.addItem(dictItem)
@@ -578,6 +582,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.showAlert(title: "学到 \(added.count) 个词", body: added.joined(separator: "、"))
             }
             Log.shared.info("手工纠正学习：\(added.joined(separator: "、"))")
+        }
+    }
+
+    /// 检查学习功能对当前 App 管不管用。
+    ///
+    /// 必须在 App 自己的上下文里跑 —— 从终端执行同样的检查，TCC 会把权限判定
+    /// 算到终端头上，测出来的结果不作数（实测：终端里 isTrusted 为真却拿不到焦点元素）。
+    @objc private func checkLearning() {
+        guard Injector.isTrusted else {
+            showAlert(title: "缺少辅助功能权限", body: "系统设置 → 隐私与安全性 → 辅助功能 → 勾选 DSH Voice")
+            return
+        }
+        guard let element = EditWatcher.focusedElement() else {
+            showAlert(title: "光标不在输入框里", body: "把光标放进你想测的那个 App 的输入框，再点一次这个菜单。")
+            return
+        }
+        var roleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
+        let role = roleRef as? String ?? "?"
+
+        if let text = EditWatcher.value(of: element) {
+            let tooLong = text.count > EditWatcher.maxWatchedCharacters
+            showAlert(
+                title: tooLong ? "能读到，但内容过长" : "这个 App 可以自动学习",
+                body: """
+                控件类型：\(role)
+                当前内容：\(text.count) 字
+
+                \(tooLong
+                    ? "超过 \(EditWatcher.maxWatchedCharacters) 字，为避免每 1.2 秒读一次全文，这个输入框不会被观测。"
+                    : "粘贴之后 25 秒内你在这里的修改，都会被学到。")
+                """
+            )
+        } else {
+            showAlert(
+                title: "这个 App 不暴露输入框内容",
+                body: """
+                控件类型：\(role)
+
+                它没有把文本提供给辅助功能接口，自动学习在这里不生效
+                （部分 Electron 应用、终端、某些网页输入框都这样）。
+
+                改用菜单里的「纠正最近一次…」，手改一次同样能学到词。
+                """
+            )
         }
     }
 

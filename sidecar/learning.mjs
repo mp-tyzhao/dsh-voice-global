@@ -34,6 +34,41 @@ const CONFIDENCE_LATIN = 0.90;
 const CONFIDENCE_CJK_DIRECT = 0.85;
 const CONFIDENCE_CJK_GUESSED = 0.60;
 
+/**
+ * 词表上限。
+ *
+ * 借鉴 macOS 语音控制的词汇表上限（1000 条）—— 那是个经过验证的爆炸半径上限。
+ * 我们这边除了提示长度，更重要的是：词表越长，一个错词能造成的误伤面越大。
+ */
+export const MAX_TERMS = 1000;
+
+/**
+ * 明显不是术语的形态，直接丢。
+ *
+ * 这三条来自 Gboard 官方论文里公布的过滤器（他们做 OOV 学习时踩过的坑）：
+ * 重复模式（hahaha / 好好好）、含数字、纯符号。
+ * 论文里还提到"长度 ≤ 2 的一律丢"，但那条对中文不适用 ——
+ * 中文两字词（奇绩、创坛）是常态，照搬会把正常的词也丢掉。
+ */
+function looksLikeJunk(term) {
+  const chars = [...term];
+  if (chars.length > 2) {
+    const unique = new Set(chars);
+    if (unique.size === 1) return true;                       // 好好好、aaa
+    if (unique.size <= 2 && chars.length >= 5) return true;    // hahaha、yesyes
+    // 单个字符占了一半以上 → yesss、nooo。长度门槛不能少：
+    // LLM 只有 3 个字符、L 占 2/3，但它是个正经术语。
+    if (chars.length >= 4) {
+      const counts = new Map();
+      for (const c of chars) counts.set(c, (counts.get(c) ?? 0) + 1);
+      if (Math.max(...counts.values()) / chars.length > 0.5) return true;
+    }
+  }
+  if (/\d/.test(term)) return true;                           // 含数字
+  if (!/[\u4e00-\u9fffA-Za-z]/.test(term)) return true;      // 无中文也无字母
+  return false;
+}
+
 /** 达到这个置信度就直接进词表，低于它先攒着。 */
 export const AUTO_APPLY_CONFIDENCE = 0.8;
 
@@ -169,6 +204,8 @@ export function extractTerms(raw, corrected) {
     if (!/[\u4e00-\u9fffA-Za-z]/.test(candidate.term)) continue;
     // 与原文只差大小写的整词（GitHub → github）同样跳过
     if (rawLower.split(/[^a-z0-9]+/u).includes(lower)) continue;
+    // 重复模式、含数字等明显不是术语的形态
+    if (looksLikeJunk(candidate.term)) continue;
     const existing = best.get(lower);
     if (!existing || candidate.confidence > existing.confidence) best.set(lower, candidate);
   }
@@ -219,7 +256,10 @@ export function mergeTerms(dictionaryPath, newTerms) {
   const existing = new Set(terms.map((t) => t.toLowerCase()));
 
   const added = [];
+  const existingCount = existing.length;
+  let dropped = 0;
   for (const term of names) {
+    if (existingCount + added.length >= MAX_TERMS) { dropped += 1; continue; }
     const clean = String(term).trim();
     if (!clean || existing.has(clean.toLowerCase())) continue;
     existing.add(clean.toLowerCase());

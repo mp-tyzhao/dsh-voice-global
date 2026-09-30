@@ -102,6 +102,20 @@ console.log('\n— 合并进词表 —');
 }
 
 
+console.log('\n— 明显不是术语的形态（Gboard 过滤器）—');
+{
+  const junk = ['hahaha', 'yesss', 'nooo', '好好好', 'abc123'];
+  for (const term of junk) {
+    const got = extractTermNames('原始文本', `原始文本 ${term}`);
+    check(`丢弃 ${term}`, got.length === 0, JSON.stringify(got));
+  }
+  // 误伤检查：这三个都容易被"重复字符"规则误杀
+  for (const term of ['LLM', 'prompt', 'Alibaba', 'Kubernetes']) {
+    const got = extractTermNames('原始文本', `原始文本 ${term}`);
+    check(`保留 ${term}`, got.includes(term), JSON.stringify(got));
+  }
+}
+
 console.log('\n— 置信度分级与待定区 —');
 {
   const latin = extractTerms('我们想想像tys那样', '我们想想像Typeless那样');

@@ -203,8 +203,21 @@ const mean = (pick) => rows.reduce((sum, row) => sum + pick(row), 0) / rows.leng
 const asrCer = mean((r) => r.rawCer);
 const finalCer = mean((r) => r.outCer);
 
+// ── 修改率（WMR）────────────────────────────────────────────────────────────
+// 调研里给的线上护栏指标：用户改掉多少听写结果。
+// 关键洞察是**坏纠正不会体现在最终文本里**（用户会自己改回来），
+// 所以"最终文本对不对"测不出来，只能看用户改了多少次。
+// 见 Alharbi & Stuerzlinger, Graphics Interface 2022：10% 错误率用户能忍，
+// 20% 等同于没有自动纠正，而两者的最终文本准确率没有显著差别。
+const edited = corpus.filter((entry) => entry.corrected).length;
+const editRate = corpus.length ? edited / corpus.length : 0;
+
 console.log();
 console.log('='.repeat(78));
+console.log(`  语料修改率    ${pct(editRate)}（${edited}/${corpus.length} 条被手工改过）`);
+console.log('                越低越好。它比 CER 更早暴露问题：坏纠正不会体现');
+console.log('                在最终文本里，用户会自己改回来 —— 所以只能看改了多少次。');
+console.log();
 console.log(`  样本数        ${rows.length}`);
 console.log(`  ASR 原始 CER  ${pct(asrCer)}`);
 console.log(`  最终输出 CER  ${pct(finalCer)}`);
