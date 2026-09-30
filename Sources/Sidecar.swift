@@ -71,6 +71,8 @@ final class Sidecar {
                 process.arguments = [script.path]
                 var environment = ProcessInfo.processInfo.environment
                 environment["VOICE_GLOBAL_MODEL_ROOT"] = modelRoot
+                // 具体用哪个模型目录（可用 profile.json 描述类型）
+                environment["VOICE_GLOBAL_MODEL_DIR"] = config.resolvedModelDir
                 environment["VOICE_GLOBAL_THREADS"] = String(config.threads)
                 environment["VOICE_GLOBAL_TRIM_END_PUNCT"] = config.trimEndPunctuation ? "1" : "0"
                 // 允许直接指定单个文件，便于换精度（int8/fp32）或换一套自训练权重

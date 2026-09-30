@@ -34,6 +34,8 @@ const argv = process.argv.slice(2);
 const RERUN = argv.includes('--rerun');
 const NO_DICT = argv.includes('--no-dict');
 const NO_GAIN = argv.includes('--no-gain');
+// 换模型对比：给出模型目录（含 profile.json），走同一套评测
+const MODEL_DIR = argv.includes('--model-dir') ? argv[argv.indexOf('--model-dir') + 1] : '';
 // 同一配置重复跑几次取均值。实测单跑噪声约 1.1 个点 ——
 // 不比这个小得多的差异就下结论，等于在噪声里找信号。
 const REPEAT = Math.max(1, Number(argv[argv.indexOf('--repeat') + 1]) || 1);
@@ -97,6 +99,7 @@ function runPipeline(wavPath, dictionaryPath) {
     const env = { ...process.env };
     if (dictionaryPath) env.VOICE_GLOBAL_DICTIONARY = dictionaryPath;
     if (NO_GAIN) env.VOICE_GLOBAL_NO_GAIN = '1';
+    if (MODEL_DIR) env.VOICE_GLOBAL_MODEL_DIR = MODEL_DIR;
     const child = spawn('node', [join(ROOT, 'sidecar', 'server.mjs'), '--once', wavPath, '--cleanup', 'llm'], {
       env, stdio: ['ignore', 'pipe', 'ignore'],
     });
@@ -130,7 +133,8 @@ console.log('准确率评测');
 console.log('='.repeat(78));
 console.log(`  语料条目    ${corpus.length}`);
 console.log(`  有正确答案  ${cases.length}${cases.length === 0 ? '   ← 先攒一些带标注的语料' : ''}`);
-console.log(`  模式        ${RERUN ? `重跑流水线 ×${REPEAT}` : '用语料里存的输出'}${NO_DICT ? '（关掉词表）' : ''}${NO_GAIN ? '（关掉增益）' : ''}`);
+console.log(`  模式        ${RERUN ? `重跑流水线 ×${REPEAT}` : '用语料里存的输出'}${NO_DICT ? '（关掉词表）' : ''}${NO_GAIN ? '（关掉增益）' : ''}`
+    + (MODEL_DIR ? `\n  模型目录    ${MODEL_DIR}` : ''));
 console.log();
 
 if (cases.length === 0) {

@@ -32,6 +32,9 @@ const DEFAULTS = {
   tapMaxSeconds: 0.45,
   nodePath: '',
   modelRoot: '',
+  // 具体用哪个模型：模型根目录下的子目录名，或绝对路径。
+  // 目录里可以放 profile.json 描述模型类型（senseVoice / whisper / paraformer / transducer…）
+  modelDir: '',
   modelPath: '',
   tokensPath: '',
   vadPath: '',
@@ -98,6 +101,22 @@ setIf('--base-url', () => { config.llm.baseURL = value('--base-url'); });
 setIf('--model', () => { config.llm.model = value('--model'); });
 setIf('--api-key-env', () => { config.llm.apiKeyEnv = value('--api-key-env'); });
 setIf('--api-key-command', () => { config.llm.apiKeyCommand = value('--api-key-command'); });
+
+// 模型选择
+if (has('--model-dir')) config.modelDir = value('--model-dir');
+if (has('--list-models')) {
+  const { execFileSync } = await import('node:child_process');
+  const root = config.resolvedModelRoot || config.modelRoot;
+  try {
+    const out = execFileSync(process.execPath, [new URL('./../sidecar/server.mjs', import.meta.url).pathname, '--list-profiles'], {
+      env: { ...process.env, VOICE_GLOBAL_MODEL_ROOT: root }, encoding: 'utf8',
+    });
+    process.stdout.write(out);
+  } catch (error) {
+    process.stderr.write(`列出模型失败：${error.message}\n`);
+  }
+  process.exit(0);
+}
 
 // 末尾标点 / 学习开关
 if (has('--trim-end-punct')) config.trimEndPunctuation = (value('--trim-end-punct') ?? 'true') !== 'false';

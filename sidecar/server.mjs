@@ -26,23 +26,46 @@
 import { readFileSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { existsSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { clean, trimEndPunctuation } from './cleanup.mjs';
 import { polish, isPlausible } from './llm.mjs';
 import { loadTerms, renderVocabularyPrompt, stripFabricatedTerms } from './dictionary.mjs';
 import { applyTerms } from './phonetic.mjs';
+import { loadProfile, buildModelConfig, decodingMethod, supportsHotwords, discoverProfiles } from './profiles.mjs';
 
 const require = createRequire(import.meta.url);
 
 const MODEL_ROOT = process.env.VOICE_GLOBAL_MODEL_ROOT
   || join(homedir(), '.voice-global', 'models');
-const MODEL = process.env.VOICE_GLOBAL_MODEL || join(MODEL_ROOT, 'sensevoice-onnx', 'model.int8.onnx');
-const TOKENS = process.env.VOICE_GLOBAL_TOKENS || join(MODEL_ROOT, 'sensevoice-onnx', 'tokens.txt');
-const VAD = process.env.VOICE_GLOBAL_VAD || join(MODEL_ROOT, 'silero', 'silero_vad.onnx');
+// 模型目录先定下来，档案和权重文件都相对它解析。
+// 原先这里硬编码了 sensevoice-onnx 子目录，等于换模型必须改代码。
+const MODEL_DIR = process.env.VOICE_GLOBAL_MODEL_DIR || join(MODEL_ROOT, 'sensevoice-onnx');
+const PROFILE = loadProfile(MODEL_DIR);
+const MODEL = process.env.VOICE_GLOBAL_MODEL || join(MODEL_DIR, PROFILE.model || 'model.int8.onnx');
+const TOKENS = process.env.VOICE_GLOBAL_TOKENS || join(MODEL_DIR, PROFILE.tokens || 'tokens.txt');
+// VAD 与语音模型是两回事：换模型不该把 VAD 一起换掉。
+// 所以它不跟着 MODEL_DIR 走，而是按几个常见位置依次找。
+const VAD = process.env.VOICE_GLOBAL_VAD || (() => {
+  const candidates = [
+    join(MODEL_ROOT, 'silero', 'silero_vad.onnx'),
+    join(MODEL_DIR, 'silero_vad.onnx'),
+    join(MODEL_DIR, '..', 'silero', 'silero_vad.onnx'),
+    join(homedir(), '.voice-global', 'models', 'silero', 'silero_vad.onnx'),
+    join(homedir(), '.dsh', 'speech-to-text', 'sensevoice', 'models', 'silero', 'silero_vad.onnx'),
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) || candidates[0];
+})();
 const THREADS = Number(process.env.VOICE_GLOBAL_THREADS || 2);
 /** 末尾不留标点。听写多是「半句话」，自动补上的句号反而要手动删。设 0 可关掉。 */
 const TRIM_END_PUNCT = (process.env.VOICE_GLOBAL_TRIM_END_PUNCT ?? '1') !== '0';
+/**
+ * 默认识别语言。
+ * SenseVoice 认 'auto'，Whisper 不认（会报 Invalid language）——
+ * 它的自动检测要传空字符串。所以默认值必须来自档案，不能写死。
+ */
+const DEFAULT_LANGUAGE = PROFILE.senseVoice?.language ?? PROFILE.whisper?.language ?? 'auto';
 
 /**
  * 用户词表：`~/.voice-global/dictionary.json`。
@@ -86,19 +109,22 @@ function log(...args) {
 
 let recognizer;
 let detector;
+/** 当前生效的模型档案，ready 事件里报给宿主 */
+let ACTIVE_PROFILE = null;
 
 /** 加载模型；失败时抛错，由宿主决定如何提示。 */
 function loadModels() {
   const sherpa = require('sherpa-onnx-node');
+  // 模型档案可选：没有 profile.json 时回退到默认配置，行为与接入前逐字一致
+  // 档案就放在模型文件旁边（不是 MODEL_ROOT）—— MODEL_ROOT 下面可能
+  // 有多个模型目录，档案是每个模型一份
+  const profile = loadProfile(dirname(MODEL), log);
+  ACTIVE_PROFILE = profile;
+  if (supportsHotwords(profile)) log(`该模型支持解码期热词：${profile.id}`);
   const nativeConfig = {
     featConfig: { sampleRate: 16000, featureDim: 80 },
-    modelConfig: {
-      senseVoice: { model: MODEL, language: 'auto', useInverseTextNormalization: 1 },
-      tokens: TOKENS,
-      numThreads: THREADS,
-      provider: 'cpu',
-      debug: 0,
-    },
+    decodingMethod: decodingMethod(profile),
+    modelConfig: buildModelConfig(profile, { model: MODEL, tokens: TOKENS, threads: THREADS, dir: MODEL_DIR }),
   };
   const started = performance.now();
   recognizer = new sherpa.OfflineRecognizer(nativeConfig);
@@ -235,7 +261,12 @@ function transcribeSamples(input, language) {
   const { samples, gain } = normalizeGain(input);
   if (gain > 1.2) log(`音频较轻，已增益 ${(20 * Math.log10(gain)).toFixed(1)}dB`);
 
-  nativeConfigRef.modelConfig.senseVoice.language = language || 'auto';
+  // 语言字段在不同模型里位置不同（senseVoice / whisper 各一套），
+  // 不能假设一定是 senseVoice —— 换模型时会直接抛 "Cannot set properties of undefined"。
+  const modelConfig = nativeConfigRef?.modelConfig ?? {};
+  const wanted = language || DEFAULT_LANGUAGE;
+  if (modelConfig.senseVoice) modelConfig.senseVoice.language = wanted;
+  else if (modelConfig.whisper) modelConfig.whisper.language = wanted;
   recognizer.setConfig(nativeConfigRef);
   detector.reset();
 
@@ -275,7 +306,7 @@ function transcribeSamples(input, language) {
  * @param {string} wavPath
  * @param {{language?: string, cleanup?: string}} options
  */
-async function handle({ wavPath, language = 'auto', cleanup = 'rules' }) {
+async function handle({ wavPath, language = DEFAULT_LANGUAGE, cleanup = 'rules' }) {
   const timings = {};
   const t0 = performance.now();
   const samples = readWav(wavPath);
@@ -402,7 +433,13 @@ async function handle({ wavPath, language = 'auto', cleanup = 'rules' }) {
 /** 常驻模式：逐行读取请求。 */
 async function serve() {
   const { loadMs } = loadModels();
-  emit({ event: 'ready', model: MODEL, loadMs, llm: Boolean(LLM.baseURL && LLM.model), threads: THREADS });
+  emit({
+    event: 'ready', model: MODEL, loadMs, threads: THREADS,
+    profile: ACTIVE_PROFILE
+      ? { id: ACTIVE_PROFILE.id, label: ACTIVE_PROFILE.label, type: ACTIVE_PROFILE.type }
+      : null,
+    llm: Boolean(LLM.baseURL && LLM.model),
+  });
 
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -444,6 +481,22 @@ function argValue(name) {
   return index >= 0 && index + 1 < argv.length ? argv[index + 1] : undefined;
 }
 
+// 列出可用的模型档案。换模型时先跑这个看有哪些可选。
+if (argv.includes('--list-profiles')) {
+  const roots = [MODEL_ROOT, process.env.VOICE_GLOBAL_MODEL_ROOT_ALT].filter(Boolean);
+  const found = discoverProfiles(roots);
+  const active = PROFILE;
+  process.stdout.write(`${JSON.stringify({
+    active: { id: active.id, label: active.label, type: active.type, model: MODEL },
+    available: found.map((p) => ({
+      id: p.id, label: p.label, type: p.type, dir: p.dir,
+      supportsHotwords: supportsHotwords(p),
+      active: p.dir === dirname(MODEL),
+    })),
+  }, null, 2)}\n`);
+  process.exit(0);
+}
+
 if (argv.includes('--once')) {
   // 单次模式：node server.mjs --once /path/a.wav [--cleanup rules|llm|off] [--language zh]
   const wavPath = argValue('--once');
@@ -452,7 +505,7 @@ if (argv.includes('--once')) {
     process.exit(1);
   }
   const cleanup = argValue('--cleanup') ?? 'rules';
-  const language = argValue('--language') ?? 'auto';
+  const language = argValue('--language') ?? DEFAULT_LANGUAGE;
   loadModels();
   handle({ wavPath, language, cleanup })
     .then((result) => emit({ ok: true, ...result }))

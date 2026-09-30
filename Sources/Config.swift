@@ -92,6 +92,10 @@ struct VoiceConfig: Codable {
     var nodePath = ""
     /// SenseVoice 模型根目录；留空用 DSH 的缓存位置
     var modelRoot = ""
+    /// 具体用哪个模型：模型根目录下的子目录名，或绝对路径。
+    /// 留空则用默认的 sensevoice-onnx。
+    /// 目录里可以放 profile.json 描述模型类型，没有就按 SenseVoice 处理。
+    var modelDir = ""
     /// 可选：直接指定 ONNX 权重文件（换精度 / 换自训练权重）
     var modelPath = ""
     /// 可选：直接指定 tokens.txt
@@ -143,6 +147,14 @@ struct VoiceConfig: Codable {
     var llm = LLMConfig()
 
     /// 本机检测到的可用模型目录（包内自带的优先，其次自己下的，最后复用 DSH 已下载的缓存）。
+    /// 解析成绝对路径的模型目录。留空则用默认子目录。
+    var resolvedModelDir: String {
+        let root = resolvedModelRoot
+        guard !modelDir.isEmpty else { return (root as NSString).appendingPathComponent("sensevoice-onnx") }
+        if modelDir.hasPrefix("/") { return modelDir }
+        return (root as NSString).appendingPathComponent(modelDir)
+    }
+
     static var detectedModelRoot: String {
         let fileManager = FileManager.default
         var candidates: [String] = []
@@ -159,7 +171,7 @@ struct VoiceConfig: Codable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case language, cleanup, tapMaxSeconds, nodePath, modelRoot, threads
+        case language, cleanup, tapMaxSeconds, nodePath, modelRoot, modelDir, threads
         case modelPath, tokensPath, vadPath
         case restoreClipboard, pasteDelayMs, restoreDelayMs, showHUD, playSounds, llm
         case idleUnloadSeconds, trimEndPunctuation, learnFromEdits
@@ -174,6 +186,7 @@ struct VoiceConfig: Codable {
         tapMaxSeconds = c.fallback(.tapMaxSeconds, 0.45)
         nodePath = c.fallback(.nodePath, "")
         modelRoot = c.fallback(.modelRoot, "")
+        modelDir = c.fallback(.modelDir, "")
         modelPath = c.fallback(.modelPath, "")
         tokensPath = c.fallback(.tokensPath, "")
         vadPath = c.fallback(.vadPath, "")
@@ -202,6 +215,7 @@ struct VoiceConfig: Codable {
         try c.encode(tapMaxSeconds, forKey: .tapMaxSeconds)
         try c.encode(nodePath, forKey: .nodePath)
         try c.encode(modelRoot, forKey: .modelRoot)
+        try c.encode(modelDir, forKey: .modelDir)
         try c.encode(modelPath, forKey: .modelPath)
         try c.encode(tokensPath, forKey: .tokensPath)
         try c.encode(vadPath, forKey: .vadPath)

@@ -86,6 +86,28 @@ cp "$ROOT/scripts/configure.mjs" "$APP/Contents/Resources/setup/"
 cp -R "$ROOT/sidecar/node_modules" "$APP/Contents/Resources/sidecar/node_modules"
 ok "sidecar + sherpa-onnx 原生库已就位"
 
+# ── 硬校验：真正把每个模块 import 一遍 ──────────────────────────────────────
+#
+# 为什么不能只检查文件在不在：漏拷模块这个问题（dictionary / learning /
+# phonetic 曾经全都没被打进包）在开发模式下完全看不出来，因为
+# devSidecarRoot 指向仓库。用户装完才会发现学习功能和拼音层是坏的。
+#
+# import 一遍能同时验三件事：模块齐不齐、依赖包在不在（pinyin-pro）、语法对不对。
+# server.mjs 会启动服务，所以对它只做语法检查。
+echo "  校验 sidecar 模块完整性…"
+node --input-type=module -e '
+  const modules = ["cleanup.mjs", "dictionary.mjs", "learning.mjs", "llm.mjs", "phonetic.mjs"];
+  const dir = process.argv[1];
+  for (const name of modules) await import(new URL(name, `file://${dir}/`).href);
+  console.log(`    已 import ${modules.length} 个模块`);
+' "$APP/Contents/Resources/sidecar" || die "sidecar 模块校验失败：打包出来的 App 会缺功能"
+node --check "$APP/Contents/Resources/sidecar/server.mjs" || die "server.mjs 语法检查失败"
+
+# 拼音层依赖 pinyin-pro：漏了它，中文同音字纠正会静默失效
+[ -d "$APP/Contents/Resources/sidecar/node_modules/pinyin-pro" ] \
+  || die "缺 pinyin-pro：拼音层会失效，回退到纯字面匹配"
+ok "sidecar 模块与依赖校验通过"
+
 # ── 3. 内置 Node 运行时 ────────────────────────────────────────────────────
 echo
 echo "[3/6] 内置 Node 运行时 v${NODE_VERSION}（目标机器无需安装 Node）"
