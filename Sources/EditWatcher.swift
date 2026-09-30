@@ -63,6 +63,7 @@ final class EditWatcher {
         self.pasted = pasted
         self.raw = raw
         self.deadline = Date().addingTimeInterval(EditWatcher.watchSeconds)
+        Log.shared.info("学习：开始观测输入框（\(text.count) 字），\(Int(EditWatcher.watchSeconds)) 秒内的改动会被学习")
 
         let timer = Timer.scheduledTimer(withTimeInterval: EditWatcher.pollInterval, repeats: true) { [weak self] _ in
             self?.poll()

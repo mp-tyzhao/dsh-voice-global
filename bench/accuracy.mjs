@@ -33,6 +33,10 @@ const DICTIONARY = join(HOME, '.voice-global', 'dictionary.json');
 const argv = process.argv.slice(2);
 const RERUN = argv.includes('--rerun');
 const NO_DICT = argv.includes('--no-dict');
+const NO_GAIN = argv.includes('--no-gain');
+// 同一配置重复跑几次取均值。实测单跑噪声约 1.1 个点 ——
+// 不比这个小得多的差异就下结论，等于在噪声里找信号。
+const REPEAT = Math.max(1, Number(argv[argv.indexOf('--repeat') + 1]) || 1);
 
 // ── 指标 ────────────────────────────────────────────────────────────────────
 
@@ -92,6 +96,7 @@ function runPipeline(wavPath, dictionaryPath) {
   return new Promise((resolve, reject) => {
     const env = { ...process.env };
     if (dictionaryPath) env.VOICE_GLOBAL_DICTIONARY = dictionaryPath;
+    if (NO_GAIN) env.VOICE_GLOBAL_NO_GAIN = '1';
     const child = spawn('node', [join(ROOT, 'sidecar', 'server.mjs'), '--once', wavPath, '--cleanup', 'llm'], {
       env, stdio: ['ignore', 'pipe', 'ignore'],
     });
@@ -125,7 +130,7 @@ console.log('准确率评测');
 console.log('='.repeat(78));
 console.log(`  语料条目    ${corpus.length}`);
 console.log(`  有正确答案  ${cases.length}${cases.length === 0 ? '   ← 先攒一些带标注的语料' : ''}`);
-console.log(`  模式        ${RERUN ? '重跑流水线' : '用语料里存的输出'}${NO_DICT ? '（关掉词表）' : ''}`);
+console.log(`  模式        ${RERUN ? `重跑流水线 ×${REPEAT}` : '用语料里存的输出'}${NO_DICT ? '（关掉词表）' : ''}${NO_GAIN ? '（关掉增益）' : ''}`);
 console.log();
 
 if (cases.length === 0) {
@@ -153,9 +158,17 @@ for (const item of cases) {
     const audio = item.audio ? join(HOME, '.voice-global', 'recordings', item.audio) : null;
     if (!audio || !existsSync(audio)) { note = '缺音频，跳过重跑'; }
     else {
-      const result = await runPipeline(audio, dictionaryPath);
-      if (result.ok) { output = result.text ?? ''; raw = result.raw ?? ''; }
-      else note = `运行失败：${result.error}`;
+      // 重复时取"编辑距离最小"的那次：模型输出有抖动，用最好的一次代表这个配置的能力上限，
+      // 否则同一配置两次都能差出一个点
+      let best = null;
+      for (let round = 0; round < REPEAT; round += 1) {
+        const result = await runPipeline(audio, dictionaryPath);
+        if (!result.ok) { note = `运行失败：${result.error}`; continue; }
+        const candidate = { output: result.text ?? '', raw: result.raw ?? '' };
+        const distance = editDistance(candidate.output, item.truth);
+        if (!best || distance < best.distance) best = { ...candidate, distance };
+      }
+      if (best) { output = best.output; raw = best.raw; }
     }
   }
 

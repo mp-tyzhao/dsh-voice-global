@@ -31,6 +31,7 @@ import { performance } from 'node:perf_hooks';
 import { clean, trimEndPunctuation } from './cleanup.mjs';
 import { polish, isPlausible } from './llm.mjs';
 import { loadTerms, renderVocabularyPrompt, stripFabricatedTerms } from './dictionary.mjs';
+import { applyTerms } from './phonetic.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -147,12 +148,93 @@ function readWav(path) {
 }
 
 /**
+ * 自适应音量
+ * ==========
+ *
+ * 不同电脑、不同麦克风、不同环境、不同说话音量，录进来的电平能差 30dB 以上。
+ * 目标是让**送进语音模型的电平大体一致**，而不是越大越好。
+ *
+ * 做法：
+ *   1. 分帧（20ms）算每帧 RMS
+ *   2. 取分位数：噪声底 = 10%，语音电平 = 90%
+ *      —— 用分位数而不是峰值：峰值会被一声咳嗽、一个爆破音带偏
+ *   3. **正常区间内不动**。实测把正常音量的录音统一抬到 -20dB 反而变差
+ *      （16.6% → 19.1%，超过测量噪声）：那点电平本来模型就认得，
+ *      抬上去只会把底噪一起放大。所以只救**真的偏轻或偏响**的录音。
+ *   4. 超出区间就向最近的边缘靠，提升上限按信噪比放开（干净的多提，嘈杂的少提）
+ *
+ * 死区是 ±6dB（-26dB 中心）：覆盖"正常说话"的常见范围，
+ * 又能在换麦克风、离得远、环境吵的时候把电平拉回来。
+ */
+const GAIN_CENTER_DB = -26;   // 正常工作电平
+const GAIN_DEAD_ZONE_DB = 6;  // 这个范围内认为电平已经合适
+const GAIN_MAX_CUT_DB = 20;
+const GAIN_FRAME = 320;      // 20ms @16kHz
+
+function percentile(sorted, ratio) {
+  if (!sorted.length) return 0;
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * ratio)));
+  return sorted[index];
+}
+
+function normalizeGain(samples, verbose = true) {
+  // 消融用：设 VOICE_GLOBAL_NO_GAIN=1 可关掉，方便量出它到底贡献了多少
+  if (process.env.VOICE_GLOBAL_NO_GAIN === '1') return { samples, gain: 1 };
+
+  // 1. 分帧 RMS（dBFS）
+  const frames = [];
+  for (let offset = 0; offset + GAIN_FRAME <= samples.length; offset += GAIN_FRAME) {
+    let energy = 0;
+    for (let i = offset; i < offset + GAIN_FRAME; i += 1) energy += samples[i] * samples[i];
+    const rms = Math.sqrt(energy / GAIN_FRAME);
+    if (rms > 1e-7) frames.push(20 * Math.log10(rms));
+  }
+  if (!frames.length) return { samples, gain: 1 };
+
+  frames.sort((a, b) => a - b);
+  const noiseDb = percentile(frames, 0.1);
+  const speechDb = percentile(frames, 0.9);
+  const snrDb = speechDb - noiseDb;
+
+  // 2. 整段几乎无声：放大只会出幻觉
+  if (speechDb < -55) return { samples, gain: 1 };
+
+  // 3. 落在正常区间就不动 —— 实测把正常音量统一抬到某个目标反而变差，
+  //    那点电平模型本来就认得，抬上去只是把底噪一起放大。
+  const lower = GAIN_CENTER_DB - GAIN_DEAD_ZONE_DB;   // -32dB：比这更轻才算"偏轻"
+  const upper = GAIN_CENTER_DB + GAIN_DEAD_ZONE_DB;   // -20dB：比这更响才算"偏响"
+  if (speechDb >= lower && speechDb <= upper) return { samples, gain: 1, speechDb, noiseDb, snrDb };
+
+  // 4. 超出区间：朝最近的边缘靠，不是一律拉到一个点
+  const targetDb = speechDb < lower ? GAIN_CENTER_DB : upper;
+  let gainDb = targetDb - speechDb;
+  // 提升上限按信噪比放开：录音干净（只是轻）就敢多提；底噪大的少提，别把噪声喂给模型
+  const ceilingDb = snrDb >= 25 ? 33 : snrDb >= 15 ? 24 : snrDb >= 6 ? 12 : 6;
+  gainDb = Math.max(-GAIN_MAX_CUT_DB, Math.min(ceilingDb, gainDb));
+  if (Math.abs(gainDb) < 1) return { samples, gain: 1, speechDb, noiseDb, snrDb };
+
+  const gain = Math.pow(10, gainDb / 20);
+  const out = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i += 1) {
+    out[i] = Math.max(-1, Math.min(1, samples[i] * gain));
+  }
+  if (verbose) {
+    log(`音量自适应：语音 ${speechDb.toFixed(0)}dB / 噪声 ${noiseDb.toFixed(0)}dB` +
+        `（信噪比 ${snrDb.toFixed(0)}dB）→ 增益 ${gainDb >= 0 ? '+' : ''}${gainDb.toFixed(1)}dB`);
+  }
+  return { samples: out, gain };
+}
+
+/**
  * 用 VAD 分段后逐段解码；VAD 未切出任何语音时回退整段解码。
  * @param {Float32Array} samples
  * @param {string} language
  * @returns {string}
  */
-function transcribeSamples(samples, language) {
+function transcribeSamples(input, language) {
+  const { samples, gain } = normalizeGain(input);
+  if (gain > 1.2) log(`音频较轻，已增益 ${(20 * Math.log10(gain)).toFixed(1)}dB`);
+
   nativeConfigRef.modelConfig.senseVoice.language = language || 'auto';
   recognizer.setConfig(nativeConfigRef);
   detector.reset();
@@ -235,13 +317,21 @@ async function handle({ wavPath, language = 'auto', cleanup = 'rules' }) {
       const t2 = performance.now();
       const vocabulary = currentVocabulary();
       try {
+        // 拼音层先跑一遍：本地、确定性、零成本，把同音字改对（`奇迹创谈`→`奇绩创坛`）。
+        // 放在 LLM 之前，模型看到的就是更干净的输入。
+        const beforeLLM = vocabulary.terms.length ? applyTerms(raw, vocabulary.terms) : { text: raw, applied: [] };
+        if (beforeLLM.applied.length) {
+          log(`拼音层纠正：${beforeLLM.applied.map((a) => `${a.from}→${a.to}`).join('、')}`);
+          hits = [...hits, ...beforeLLM.applied.map((a) => `phonetic:${a.to}`)];
+        }
+
         // 直接把原始转写交给模型：规则层删改过的文本会丢掉上下文
         // （比如把"呃那个我们"里的"呃"留下、却让模型看不到原句结构）
         const refined = await polish({
           baseURL: LLM.baseURL,
           apiKey: LLM.apiKey,
           model: LLM.model,
-          text: raw,
+          text: beforeLLM.text,
           vocabularyText: vocabulary.prompt,
           timeoutMs: LLM.timeoutMs,
           onUsage: (usage) => {
@@ -268,6 +358,15 @@ async function handle({ wavPath, language = 'auto', cleanup = 'rules' }) {
             // 重建文本会丢标点，跑一次规则层补回来
             text = clean(guarded.text, { spaceCJK: false }).text;
             hits = [...hits, ...guarded.removed.map((term) => `fabricated:${term}`)];
+          }
+
+          // 最后再兜一次拼音层：模型可能把已经改对的词又写回去了
+          if (vocabulary.terms.length) {
+            const afterLLM = applyTerms(text, vocabulary.terms);
+            if (afterLLM.applied.length) {
+              log(`拼音层兜底：${afterLLM.applied.map((a) => `${a.from}→${a.to}`).join('、')}`);
+              text = afterLLM.text;
+            }
           }
         } else {
           polishError = 'llm 结果偏离原文，已退回规则清理';

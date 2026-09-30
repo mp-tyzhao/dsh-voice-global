@@ -913,6 +913,30 @@ if arguments.contains("--check") {
     exit(0)
 }
 
+// 学习功能依赖「读得到焦点输入框的文本」。这个命令用来验证某个 App 支不支持：
+// 把光标放进那个 App 的输入框，再跑它。
+if arguments.contains("--ax-probe") {
+    if !Injector.isTrusted {
+        print("❌ 缺少辅助功能权限，读不到任何输入框")
+        exit(2)
+    }
+    guard let element = EditWatcher.focusedElement() else {
+        print("✗ 拿不到焦点元素 —— 光标不在任何输入框里？")
+        exit(1)
+    }
+    var roleRef: CFTypeRef?
+    AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
+    let role = roleRef as? String ?? "?"
+    if let text = EditWatcher.value(of: element) {
+        print("✅ 能读到这个输入框（角色 \(role)，\(text.count) 字）—— 学习功能对它有效")
+        print("   内容末尾：\(text.suffix(40).debugDescription)")
+    } else {
+        print("✗ 读不到文本（角色 \(role)）—— 这个 App 不暴露输入框内容，学习功能对它无效")
+        exit(1)
+    }
+    exit(0)
+}
+
 if let index = arguments.firstIndex(of: "--selftest") {
     let seconds = index + 1 < arguments.count ? Double(arguments[index + 1]) ?? 4 : 4
     runSelfTest(seconds: seconds)
