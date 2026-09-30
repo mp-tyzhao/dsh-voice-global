@@ -108,6 +108,25 @@ struct VoiceConfig: Codable {
     /// 空闲多久后卸载识别模型（秒）。模型常驻约 900MB，重载只要 0.4 秒，所以默认 5 分钟就释放。
     var idleUnloadSeconds = 300
 
+    // MARK: - 开发模式（特别版）
+
+    /// sidecar 源码目录（仓库根路径）。填了就不再用 app 包内的那份拷贝，
+    /// 直接跑仓库里的 `sidecar/*.mjs` —— 改完不用重新打包 App。
+    /// 留空 = 正常分发包行为。
+    var devSidecarRoot = ""
+    /// 盯住上面的目录，`.mjs` 一改就停掉识别进程，下次录音自动加载新代码。
+    var devAutoReload = true
+
+    // MARK: - 录音留存（特别版）
+
+    /// 留存每段录音与转写元数据。**音频只留在本机，不上传。**
+    /// 用途：改了 VAD 阈值 / 模型 / prompt 之后，拿同一批真实音频做回归对比。
+    var keepRecordings = false
+    /// 保留上限：条数 / 总大小 MB / 天数。0 表示该项不限制。
+    var recordingsMaxCount = 500
+    var recordingsMaxMB = 500
+    var recordingsMaxDays = 30
+
     var llm = LLMConfig()
 
     /// 本机检测到的可用模型目录（包内自带的优先，其次自己下的，最后复用 DSH 已下载的缓存）。
@@ -131,6 +150,8 @@ struct VoiceConfig: Codable {
         case modelPath, tokensPath, vadPath
         case restoreClipboard, pasteDelayMs, restoreDelayMs, showHUD, playSounds, llm
         case idleUnloadSeconds
+        case devSidecarRoot, devAutoReload
+        case keepRecordings, recordingsMaxCount, recordingsMaxMB, recordingsMaxDays
     }
 
     init(from decoder: Decoder) throws {
@@ -150,6 +171,12 @@ struct VoiceConfig: Codable {
         showHUD = c.fallback(.showHUD, true)
         playSounds = c.fallback(.playSounds, true)
         idleUnloadSeconds = c.fallback(.idleUnloadSeconds, 300)
+        devSidecarRoot = c.fallback(.devSidecarRoot, "")
+        devAutoReload = c.fallback(.devAutoReload, true)
+        keepRecordings = c.fallback(.keepRecordings, false)
+        recordingsMaxCount = c.fallback(.recordingsMaxCount, 500)
+        recordingsMaxMB = c.fallback(.recordingsMaxMB, 500)
+        recordingsMaxDays = c.fallback(.recordingsMaxDays, 30)
         llm = c.fallback(.llm, LLMConfig())
     }
 
@@ -170,6 +197,12 @@ struct VoiceConfig: Codable {
         try c.encode(showHUD, forKey: .showHUD)
         try c.encode(playSounds, forKey: .playSounds)
         try c.encode(idleUnloadSeconds, forKey: .idleUnloadSeconds)
+        try c.encode(devSidecarRoot, forKey: .devSidecarRoot)
+        try c.encode(devAutoReload, forKey: .devAutoReload)
+        try c.encode(keepRecordings, forKey: .keepRecordings)
+        try c.encode(recordingsMaxCount, forKey: .recordingsMaxCount)
+        try c.encode(recordingsMaxMB, forKey: .recordingsMaxMB)
+        try c.encode(recordingsMaxDays, forKey: .recordingsMaxDays)
         try c.encode(llm, forKey: .llm)
     }
 

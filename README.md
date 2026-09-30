@@ -241,6 +241,54 @@ swiftc -O -o /tmp/single-instance-test Sources/SingleInstance.swift tests/single
 | 润色超时 | 自动退回规则层结果，不影响使用；可调 `llm.timeoutMs` |
 | 与 Typeless 等工具冲突 | 它们默认也抢 Fn，建议只留一个 |
 
+## 特别版：开发模式与录音留存
+
+两个默认关闭的开关，给"要持续迭代这个产品"的人用。
+
+### 开发模式：改代码立刻生效
+
+```bash
+node scripts/configure.mjs --dev-root "$PWD"    # sidecar 直接跑仓库里的那份
+./scripts/dev.sh                                 # 盯 Sources/，改动即重建重启
+```
+
+| 改什么 | 怎么生效 |
+| --- | --- |
+| `sidecar/*.mjs`（清理规则、LLM prompt、VAD 参数） | **不用重新打包**。App 盯着这三个文件，一改就自动重启识别进程并在日志里报"热重载完成" |
+| `Sources/*.swift` | 跑 `./scripts/dev.sh`，保存即重建重启（也能 `--once` 只重建一次） |
+
+`sidecar` 侧立即重启而不是等下次录音，是为了**语法错误马上暴露在日志里**，
+而不是等你下一次按 Fn 才发现。
+
+### 录音留存：攒真实语料
+
+```bash
+node scripts/configure.mjs --keep-recordings true
+```
+
+开启后，每段录音连同转写元数据归档到 `~/.voice-global/recordings/`：
+
+```
+audio/2026-09-30T23-40-12-345Z.wav
+index.jsonl        一行一条，可直接 jq / grep
+```
+
+`index.jsonl` 里每条记录了 ASR 原始输出、最终粘贴的文本、命中的规则、各阶段耗时，
+以及当时的模型与参数（`env` 字段）。**改 VAD 阈值、换模型、调 prompt 之后，可以拿同一批
+真实音频做前后对比，量出到底有没有变准**，而不是靠感觉。
+
+> **音频只留在本机，不会上传到任何地方。** 默认关闭。菜单栏里有「打开录音目录」和
+> 「清空录音与元数据」。占用约 **32KB/秒**，默认保留最近 500 条 / 500MB / 30 天
+> （三个上限都可以在配置里调，配 0 表示不限制）。
+
+菜单栏会显示当前状态：
+
+```
+录音留存：128 条 · 41MB
+开发模式：改动自动重载
+```
+
+
 日志：`~/.voice-global/log.txt`（每次听写会记录耗时与 token 用量）。
 
 ## 发给别人用

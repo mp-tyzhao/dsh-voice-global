@@ -42,6 +42,14 @@ const DEFAULTS = {
   showHUD: true,
   playSounds: true,
   idleUnloadSeconds: 300,
+  // 开发模式（特别版）：指向仓库根，改完 sidecar/*.mjs 不用重新打包
+  devSidecarRoot: '',
+  devAutoReload: true,
+  // 录音留存（特别版）：音频只留本机
+  keepRecordings: false,
+  recordingsMaxCount: 500,
+  recordingsMaxMB: 500,
+  recordingsMaxDays: 30,
   llm: {
     enabled: false,
     baseURL: '',
@@ -86,6 +94,18 @@ setIf('--base-url', () => { config.llm.baseURL = value('--base-url'); });
 setIf('--model', () => { config.llm.model = value('--model'); });
 setIf('--api-key-env', () => { config.llm.apiKeyEnv = value('--api-key-env'); });
 setIf('--api-key-command', () => { config.llm.apiKeyCommand = value('--api-key-command'); });
+
+// 开发模式：把 sidecar 指向仓库，改完 .mjs 立刻生效
+setIf('--dev-root', () => { config.devSidecarRoot = value('--dev-root') ?? ''; });
+setIf('--dev-autoreload', () => { config.devAutoReload = value('--dev-autoreload') !== 'false'; });
+
+// 录音留存：默认关；--keep-recordings false 也能关掉
+if (has('--keep-recordings')) {
+  config.keepRecordings = (value('--keep-recordings') ?? 'true') !== 'false';
+}
+setIf('--recordings-max-count', () => { config.recordingsMaxCount = Number(value('--recordings-max-count')); });
+setIf('--recordings-max-mb', () => { config.recordingsMaxMB = Number(value('--recordings-max-mb')); });
+setIf('--recordings-max-days', () => { config.recordingsMaxDays = Number(value('--recordings-max-days')); });
 
 // 密钥走 .env，不进 config.json；传 --api-key "" 表示清掉
 if (has('--api-key')) {

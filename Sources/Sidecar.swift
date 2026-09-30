@@ -47,6 +47,7 @@ final class Sidecar {
 
     /// 启动进程并等待模型加载完成。已在运行且就绪时直接成功，可安全重复调用。
     func start(config: VoiceConfig, completion: @escaping (Swift.Result<Void, Error>) -> Void) {
+        lastConfig = config
         queue.async { [self] in
             if process != nil {
                 if ready {
@@ -61,7 +62,8 @@ final class Sidecar {
             }
             do {
                 let node = try resolveNode(config: config)
-                let script = try resolveScript()
+                let script = try resolveScript(config: config)
+                self.ensureDevWatcher(config: config)
                 let modelRoot = config.resolvedModelRoot
 
                 let process = Process()
@@ -362,8 +364,15 @@ final class Sidecar {
         return nil
     }
 
-    /// sidecar 脚本：优先用 app bundle 内的拷贝，开发时回退到源码目录。
-    private func resolveScript() throws -> URL {
+    /// sidecar 脚本：开发模式指定目录优先，其次 app bundle 内的拷贝，最后回退源码目录。
+    private func resolveScript(config: VoiceConfig) throws -> URL {
+        // 【特别版】直接跑仓库里的 sidecar，改完 .mjs 不用重新打包 App
+        if !config.devSidecarRoot.isEmpty {
+            let dev = URL(fileURLWithPath: config.devSidecarRoot)
+                .appendingPathComponent("sidecar/server.mjs")
+            if FileManager.default.fileExists(atPath: dev.path) { return dev }
+            Log.shared.info("开发模式：\(config.devSidecarRoot) 下没有 sidecar/server.mjs，回退到包内拷贝")
+        }
         if let resource = Bundle.main.resourceURL {
             let bundled = resource.appendingPathComponent("sidecar/server.mjs")
             if FileManager.default.fileExists(atPath: bundled.path) { return bundled }
@@ -372,5 +381,63 @@ final class Sidecar {
             .appendingPathComponent("sidecar/server.mjs")
         if FileManager.default.fileExists(atPath: development.path) { return development }
         throw Failure.scriptNotFound
+    }
+
+    // MARK: - 开发模式：源码改动自动重载
+
+    /// 最近一次 start(config:) 的配置，热重载重启时复用
+    private var lastConfig: VoiceConfig?
+    private var devWatchTimer: DispatchSourceTimer?
+    private var devWatchBaseline: [String: Date]?
+
+    /// 盯住仓库里的 sidecar 源码。任何一个 `.mjs` 变了就停掉进程，
+    /// 下次录音会自动用新代码重新拉起 —— 不需要退出 App，也不需要重新打包。
+    private func ensureDevWatcher(config: VoiceConfig) {
+        guard config.devAutoReload, !config.devSidecarRoot.isEmpty, devWatchTimer == nil else { return }
+        let dir = URL(fileURLWithPath: config.devSidecarRoot).appendingPathComponent("sidecar").path
+
+        func snapshot() -> [String: Date] {
+            var out: [String: Date] = [:]
+            for name in ["server.mjs", "cleanup.mjs", "llm.mjs"] {
+                let path = "\(dir)/\(name)"
+                if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                   let modified = attrs[.modificationDate] as? Date {
+                    out[path] = modified
+                }
+            }
+            return out
+        }
+
+        devWatchBaseline = snapshot()
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "ai.dsh.voice-global.devsync"))
+        timer.schedule(deadline: .now() + 2, repeating: 2)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            let now = snapshot()
+            guard let baseline = self.devWatchBaseline else { return }
+            guard now != baseline else { return }
+            self.devWatchBaseline = now
+            let changed = now.filter { baseline[$0.key] != $0.value }.keys
+                .map { URL(fileURLWithPath: $0).lastPathComponent }
+            Log.shared.info("检测到 sidecar 源码改动（\(changed.joined(separator: ", "))），重启识别进程以加载新代码")
+            // 立刻重启而不是等下次录音：.mjs 改出语法错误时马上就能从日志看到，
+            // 不用等到下一次听写才发现。stop()/start() 内部都用 queue.sync，
+            // 必须切回主线程调用，否则死锁。
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let config = self.lastConfig else { return }
+                self.stop()
+                self.start(config: config) { result in
+                    switch result {
+                    case .success:
+                        Log.shared.info("热重载完成，识别服务已用新代码就绪")
+                    case .failure(let error):
+                        Log.shared.error("热重载失败（检查 sidecar/*.mjs）：\(error)")
+                    }
+                }
+            }
+        }
+        devWatchTimer = timer
+        timer.resume()
+        Log.shared.info("开发模式：已盯住 \(dir)，改动 .mjs 会自动重载")
     }
 }

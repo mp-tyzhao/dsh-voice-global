@@ -217,10 +217,27 @@ final class VoiceController {
         let started = Date()
         sidecar.transcribe(wav: url, config: config) { [weak self] result in
             guard let self else { return }
-            defer { try? FileManager.default.removeItem(at: url) }
+            // 临时文件的生命周期：开了留存就归档，否则用完即删
+            func dispose(archiving value: Sidecar.Result?) {
+                guard let value, self.config.keepRecordings else {
+                    try? FileManager.default.removeItem(at: url)
+                    return
+                }
+                let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 44
+                Recordings.archive(
+                    wav: url,
+                    seconds: Double(bytes - 44) / 32000,   // 16kHz 单声道 PCM16 = 32 字节/毫秒
+                    raw: value.raw,
+                    text: value.text,
+                    hits: value.hits,
+                    timings: ["asr": value.asrMilliseconds, "total": value.totalMilliseconds],
+                    config: self.config
+                )
+            }
 
             switch result {
             case .success(let value):
+                dispose(archiving: value)
                 self.state = .idle
                 self.lastTranscript = value.text
                 self.lastError = nil
@@ -243,6 +260,7 @@ final class VoiceController {
                     }
                 }
             case .failure(let error):
+                dispose(archiving: nil)
                 self.state = .idle
                 self.lastError = "\(error)"
                 self.scheduleIdleUnload()
@@ -284,6 +302,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let config = ConfigStore.load()
+        // 特别版状态记进日志，出问题时一眼能看出这台机器开着什么
+        if config.keepRecordings {
+            Log.shared.info("录音留存已开启：\(Recordings.root.path)（音频只留本机，不上传）")
+        }
         let controller = VoiceController(config: config)
         self.controller = controller
 
@@ -401,6 +423,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         add(menu, title: "打开配置", action: #selector(openConfig))
         add(menu, title: "打开日志", action: #selector(openLog))
+
+        if controller.config.keepRecordings {
+            let stats = Recordings.statistics()
+            let recordings = NSMenuItem(
+                title: "录音留存：\(stats.count) 条 · \(stats.megabytes)MB",
+                action: nil, keyEquivalent: ""
+            )
+            let recordingsMenu = NSMenu()
+            let openItem = NSMenuItem(title: "打开录音目录", action: #selector(openRecordings), keyEquivalent: "")
+            openItem.target = self
+            recordingsMenu.addItem(openItem)
+            let clearItem = NSMenuItem(title: "清空录音与元数据…", action: #selector(clearRecordings), keyEquivalent: "")
+            clearItem.target = self
+            recordingsMenu.addItem(clearItem)
+            recordings.submenu = recordingsMenu
+            menu.addItem(recordings)
+        }
+
+        if !controller.config.devSidecarRoot.isEmpty {
+            let dev = NSMenuItem(
+                title: "开发模式：\(controller.config.devAutoReload ? "改动自动重载" : "手动重载")",
+                action: nil, keyEquivalent: ""
+            )
+            dev.isEnabled = false
+            menu.addItem(dev)
+        }
+
         add(menu, title: "重新加载配置", action: #selector(reloadConfig))
         add(menu, title: "检查权限与服务", action: #selector(runCheck))
         menu.addItem(.separator())
@@ -421,6 +470,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openLog() {
         NSWorkspace.shared.open(Paths.log)
+    }
+
+    @objc private func openRecordings() {
+        try? FileManager.default.createDirectory(at: Recordings.root, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(Recordings.root)
+    }
+
+    @objc private func clearRecordings() {
+        let stats = Recordings.statistics()
+        let alert = NSAlert()
+        alert.messageText = "清空录音与元数据？"
+        alert.informativeText = "将删除 \(stats.count) 条录音（约 \(stats.megabytes)MB）及其元数据。此操作不可撤销。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            Recordings.clearAll()
+            rebuildMenu(state: controller?.state ?? .idle)
+        }
     }
 
     @objc private func reloadConfig() {
