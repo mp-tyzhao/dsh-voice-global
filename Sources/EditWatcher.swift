@@ -55,8 +55,10 @@ final class EditWatcher {
     /// 间隔很短，上一次的 settle 回调还会继续跑 —— 它会拿**旧的 pasted**
     /// 去配**新的输入框内容**，算出一个错误的差异交给学习，等于学到垃圾。
     private var generation = 0
-    /// 用户把整段转写改成了什么样 —— 写回语料当标注
-    var onCorrection: ((String) -> Void)?
+    /// 用户把整段转写改成了什么样（含这次是「修正」还是「改主意删减」）
+    /// —— 写回语料当标注。两者必须分开：删减不是识别错误，
+    /// 当成"他实际说了什么"去算准确率会让 CER 虚高。
+    var onCorrection: ((String, EditDiff.EditKind) -> Void)?
 
     init(config: VoiceConfig, sidecar: Sidecar) {
         self.config = config
@@ -151,21 +153,30 @@ final class EditWatcher {
     // MARK: - 轮询
 
     private func poll() {
+        // 结束路径一定要记日志。
+        //
+        // 原先只有自测的 verbose 模式才记，生产环境里观测"悄悄结束"——
+        // 用户改了词没反应，日志里什么都没有，根本无法定位。
+        // 实测（2026-10-01 16:07:35）：观测启动后一片空白，
+        // 只能靠猜是超时、焦点跑了、还是判成"不是同一段"。
         let trace = { (message: String) in
             if self.verbose { Log.shared.info("自测轮询：\(message)") }
         }
+        let finish = { (reason: String) in
+            Log.shared.info("学习：观测结束（\(reason)）")
+        }
         guard Date() < deadline else {
-            trace("超时结束")
+            finish("\(Int(EditWatcher.watchSeconds)) 秒窗口内没有检测到修改")
             stop()
             return
         }
         guard let current = EditWatcher.focusedElement() else {
-            trace("拿不到焦点元素")
+            finish("拿不到焦点元素")
             stop()
             return
         }
         guard let now = EditWatcher.value(of: current) else {
-            trace("焦点元素不提供文本")
+            finish("焦点元素不提供文本")
             stop()
             return
         }
@@ -182,7 +193,7 @@ final class EditWatcher {
         //
         // 内容判据更稳：原地修改会保留大部分文本，换到别的文档则不会。
         guard EditDiff.isSameDocument(before, now) else {
-            trace("内容已不是同一段（\(before.count) → \(now.count) 字）")
+            finish("内容已不是同一段（\(before.count) → \(now.count) 字）—— 换了输入框或文档")
             stop()
             return
         }
@@ -208,7 +219,7 @@ final class EditWatcher {
     private func handleChange(from old: String, to new: String) {
         // 1. 我们粘的那段得还在（用户可能把它删了，那不算纠正）
         guard let pastedRange = old.range(of: pasted), !pasted.isEmpty else {
-            if verbose { Log.shared.info("自测轮询：粘贴段已不在新内容里") }
+            Log.shared.info("学习：改动没有落在我们粘贴的那段里，本次跳过")
             return
         }
 
@@ -221,7 +232,7 @@ final class EditWatcher {
         guard changeStart < changeEnd else { return }
         // 改动必须与粘贴段相交，否则是用户在编辑别的地方
         guard changeStart < pastedRange.upperBound, changeEnd > pastedRange.lowerBound else {
-            if verbose { Log.shared.info("自测轮询：改动不在粘贴段内") }
+            Log.shared.info("学习：用户在编辑别的位置，不是改我们的转写，本次跳过")
             return
         }
 
@@ -236,7 +247,7 @@ final class EditWatcher {
         let pastedStart = old.distance(from: old.startIndex, to: pastedRange.lowerBound)
         let pastedEnd = old.distance(from: old.startIndex, to: pastedRange.upperBound)
         if let corrected = EditDiff.correctedPasted(old: old, new: new, pastedStart: pastedStart, pastedEnd: pastedEnd) {
-            onCorrection?(corrected)
+            onCorrection?(corrected, EditDiff.classify(before: pasted, after: corrected))
         }
 
         Log.shared.info("学习：检测到用户改正（\(oldWindow.count) → \(newWindow.count) 字）")

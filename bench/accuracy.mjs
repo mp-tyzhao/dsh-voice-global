@@ -120,8 +120,13 @@ const corpus = loadCorpus();
 const manual = loadManualLabels();
 
 const cases = [];
+let trimmed = 0;
 for (const entry of corpus) {
-  const truth = manual.get(entry.ts) ?? entry.corrected;
+  const manualTruth = manual.get(entry.ts);
+  // editKind=trim 表示用户删掉了一句（改主意），不是识别错误。
+  // 拿它当"他实际说了什么"会让 CER 虚高 —— 除非有手工标注，否则不算样本。
+  if (!manualTruth && entry.editKind === 'trim') { trimmed += 1; continue; }
+  const truth = manualTruth ?? entry.corrected;
   if (!truth) continue;                       // 没有正确答案就没法算
   cases.push({ ...entry, truth });
 }
@@ -134,6 +139,7 @@ console.log('准确率评测');
 console.log('='.repeat(78));
 console.log(`  语料条目    ${corpus.length}`);
 console.log(`  有正确答案  ${cases.length}${cases.length === 0 ? '   ← 先攒一些带标注的语料' : ''}`);
+if (trimmed) console.log(`  排除删减    ${trimmed}（用户改主意删掉的，不算识别错误）`);
 console.log(`  模式        ${RERUN ? `重跑流水线 ×${REPEAT}` : '用语料里存的输出'}${NO_DICT ? '（关掉词表）' : ''}${NO_GAIN ? '（关掉增益）' : ''}`
     + (MODEL_DIR ? `\n  模型目录    ${MODEL_DIR}` : ''));
 console.log();
@@ -214,12 +220,15 @@ const finalCer = mean((r) => r.outCer);
 // 所以"最终文本对不对"测不出来，只能看用户改了多少次。
 // 见 Alharbi & Stuerzlinger, Graphics Interface 2022：10% 错误率用户能忍，
 // 20% 等同于没有自动纠正，而两者的最终文本准确率没有显著差别。
-const edited = corpus.filter((entry) => entry.corrected).length;
-const editRate = corpus.length ? edited / corpus.length : 0;
+// 只统计"修正"（fix）：删减是改主意，不是识别错误，混进来会让这个指标失真
+const fixed = corpus.filter((entry) => entry.corrected && entry.editKind !== 'trim').length;
+const trims = corpus.filter((entry) => entry.editKind === 'trim').length;
+const editRate = corpus.length ? fixed / corpus.length : 0;
 
 console.log();
 console.log('='.repeat(78));
-console.log(`  语料修改率    ${pct(editRate)}（${edited}/${corpus.length} 条被手工改过）`);
+console.log(`  识别修正率    ${pct(editRate)}（${fixed}/${corpus.length} 条改过识别错误）`);
+if (trims) console.log(`  改主意删减    ${trims} 条（不计入修正率）`);
 console.log('                越低越好。它比 CER 更早暴露问题：坏纠正不会体现');
 console.log('                在最终文本里，用户会自己改回来 —— 所以只能看改了多少次。');
 console.log();

@@ -197,7 +197,7 @@ enum Recordings {
     /// 把用户手工改成的版本写回对应记录，作为学习与评测的标注。
     /// 逐行重写文件：条目不多（上限几百条），简单可靠比省 IO 重要。
     @discardableResult
-    static func applyCorrection(ts: String, corrected: String) -> Bool {
+    static func applyCorrection(ts: String, corrected: String, kind: String = "fix") -> Bool {
         guard let text = try? String(contentsOf: indexFile, encoding: .utf8) else { return false }
         var lines = text.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
         var updated = false
@@ -212,6 +212,9 @@ enum Recordings {
                   object["ts"] as? String == ts else { continue }
             object["corrected"] = corrected
             object["correctedAt"] = ISO8601DateFormatter().string(from: Date())
+            // fix = 纠正识别错误；trim = 改主意删减。
+            // 删减不是识别错误，评测时不能拿它当"实际说了什么"。
+            object["editKind"] = kind
             guard let newData = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
                   let newLine = String(data: newData, encoding: .utf8) else { break }
             lines[index] = newLine

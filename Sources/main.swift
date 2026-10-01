@@ -101,11 +101,13 @@ final class VoiceController {
                 )
             }
         }
-        watcher.onCorrection = { corrected in
-            // 写回语料当标注：以后算准确率、做回归都靠这个字段
+        watcher.onCorrection = { corrected, kind in
+            // 写回语料当标注：以后算准确率、做回归都靠这个字段。
+            // kind 区分「修正」和「改主意删减」—— 后者不是识别错误，
+            // 当成标准答案会让 CER 虚高。
             guard let last = Recordings.lastTranscript() else { return }
-            if Recordings.applyCorrection(ts: last.ts, corrected: corrected) {
-                Log.shared.info("已记录改正：\(corrected.prefix(40))…")
+            if Recordings.applyCorrection(ts: last.ts, corrected: corrected, kind: kind.rawValue) {
+                Log.shared.info(kind == .trim ? "已记录删减（不算识别错误）" : "已记录改正：\(corrected.prefix(40))…")
             }
         }
         self.editWatcher = watcher
@@ -636,8 +638,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // 1. 写回语料当标注（评测与回归都靠它）
-        Recordings.applyCorrection(ts: last.ts, corrected: corrected)
+        // 1. 写回语料当标注（评测与回归都靠它）。
+        //    手工纠正也分两类：删掉一句是改主意，不是识别错误。
+        let kind = EditDiff.classify(before: last.text, after: corrected)
+        Recordings.applyCorrection(ts: last.ts, corrected: corrected, kind: kind.rawValue)
 
         // 2. 学习：用 raw 对照 corrected，抽出用户真正用的词
         controller?.learn(raw: last.raw, corrected: corrected) { [weak self] added, pending in

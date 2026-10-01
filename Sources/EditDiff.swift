@@ -47,6 +47,50 @@ enum EditDiff {
         return prefix + suffix >= min(before.count / 2, 40)
     }
 
+    /// 这次编辑是「修正识别错误」还是「改主意删减」。
+    ///
+    /// 两者的性质完全不同：
+    ///   · 修正：用户把听错的字改成对的 → 是学习信号，也是评测的标准答案
+    ///   · 删减：用户觉得这句话不该说，删掉了 → **不是**识别错误，
+    ///           学不到东西，也不能当成"他实际说了什么"去算准确率
+    ///
+    /// 判据：改完之后的内容是不是原文的**子序列**（只删不换不增）。
+    /// 是 → 删减。
+    enum EditKind: String {
+        case fix      // 有替换或插入：在纠正识别的错
+        case trim     // 只删不换：改主意了
+    }
+
+    /// 判断这次编辑属于哪一类。
+    ///
+    /// 光看"是不是纯删减"不够 —— `RSSI → RSI` 和 `奇绩创坛 → 奇绩创`
+    /// 都是"删掉一个字符"，但前者是修 ASR 多识别了一个字母，
+    /// 后者更可能是用户改主意不想要那个字。
+    ///
+    /// 真正的区分信号是**删掉的量**：
+    ///   · 删一两个字 → 修错字（识别问题）
+    ///   · 删掉小半句 / 一整句 → 改主意（内容问题）
+    ///
+    /// 阈值取"超过 8 个字 或 超过原文 30%"。宁可把删减判成修正（顶多让
+    /// CER 保守一点），也不要反过来 —— 那会丢掉真实的修正信号。
+    static func classify(before: String, after: String) -> EditKind {
+        let a = Array(before)
+        let b = Array(after)
+        guard b.count < a.count else { return .fix }    // 没变短：必然有替换或插入
+
+        // 双指针判断 b 是否为 a 的子序列（只删不换）
+        var i = 0
+        for character in b {
+            while i < a.count, a[i] != character { i += 1 }
+            if i == a.count { return .fix }             // 对不上 → 有替换，是修正
+            i += 1
+        }
+
+        let deleted = a.count - b.count
+        let ratio = Double(deleted) / Double(max(a.count, 1))
+        return (deleted > 8 || ratio > 0.3) ? .trim : .fix
+    }
+
     /// 我们粘贴的那一段，在用户改完之后变成了什么样。
     ///
     /// 前缀长度不变，所以只需按总长度差把尾部平移过来。

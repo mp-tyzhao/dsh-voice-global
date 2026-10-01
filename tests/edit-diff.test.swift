@@ -123,6 +123,45 @@ struct EditDiffTest {
                   EditDiff.isSameDocument(head + "中间一大段内容" + tail, head + tail))
         }
 
+        // ---- classify：区分"修正"和"改主意删减" ----
+        print("\n— 这次编辑是修正还是删减 —")
+        do {
+            check("删掉一整句 → 删减",
+                  EditDiff.classify(before: "我觉得这个方案可行，而且风险也不大",
+                                    after: "我觉得这个方案可行") == .trim)
+        }
+        do {
+            check("改掉一个字 → 修正",
+                  EditDiff.classify(before: "我们用聚水谭管订单", after: "我们用聚水潭管订单") == .fix)
+        }
+        do {
+            check("插入内容 → 修正",
+                  EditDiff.classify(before: "我们用管订单", after: "我们用聚水潭管订单") == .fix)
+        }
+        do {
+            check("删一句 + 改一个字 → 修正（改的那个仍要学）",
+                  EditDiff.classify(before: "我们用聚水谭管订单，另外还有别的",
+                                    after: "我们用聚水潭管订单") == .fix)
+        }
+        do {
+            check("完全没改 → 修正（不是删减）",
+                  EditDiff.classify(before: "原文", after: "原文") == .fix)
+        }
+        do {
+            // 关键反例：删一个字符也可能是修 ASR 多识别的字母，不是改主意
+            check("RSSI → RSI 是修正（删 1 字，不是改主意）",
+                  EditDiff.classify(before: "我们要实现语音输入的 RSSI", after: "我们要实现语音输入的 RSI") == .fix)
+        }
+        do {
+            check("删掉重复字 → 修正（只删 1 字）",
+                  EditDiff.classify(before: "你看看这个的的写法", after: "你看看这个的写法") == .fix)
+        }
+        do {
+            check("删掉小半句 → 删减",
+                  EditDiff.classify(before: "我觉得这个方案可行，而且风险也不大，可以先试试看",
+                                    after: "我觉得这个方案可行") == .trim)
+        }
+
         // ---- 端到端：真实场景串起来 ----
         print("\n— 真实场景：用户把 TYS 改成 Typeless —")
         do {
