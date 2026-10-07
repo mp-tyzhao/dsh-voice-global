@@ -30,7 +30,13 @@ import { applyTerms } from './phonetic.mjs';
  *   - 中文单字替换 + 猜上文：只确定"这个字改了"，
  *     术语边界靠上下文推，可能推出 `奇绩` 这种碎片        → 0.60，需要再次确认
  */
+// 西文词整体可信，但**短词要打折**：2-3 个字符的西文串太容易是
+// 用户正在打拼音、缩写、或者随手敲的东西。实测（2026-10-07）用户
+// 把「无层叠加」改成「tu层叠加」（在打拼音），系统就把 `tu` 学进了词表。
+// 短词降到待定区，再见一次才生效 —— 误判的代价从"污染词表"降到"多等一次"。
 const CONFIDENCE_LATIN = 0.90;
+const CONFIDENCE_LATIN_SHORT = 0.65;
+const LATIN_SHORT_LENGTH = 4;
 const CONFIDENCE_CJK_DIRECT = 0.85;
 const CONFIDENCE_CJK_GUESSED = 0.60;
 
@@ -192,8 +198,14 @@ export function extractTerms(raw, corrected) {
           candidates.push({ term: text, confidence, kind: originalLength >= MIN_CJK_RUN ? 'cjk' : 'cjk-guessed' });
         }
       } else if (text.length >= MIN_LATIN_LEN) {
-        // 西文词边界天然清楚，拼错也很可能整词被听错，置信度最高
-        candidates.push({ term: text, confidence: CONFIDENCE_LATIN, kind: 'latin' });
+        // 西文词边界天然清楚，拼错也很可能整词被听错，置信度最高；
+        // 但短串（< 4 字符）打折，进待定区等一次确认
+        const short = text.length < LATIN_SHORT_LENGTH;
+        candidates.push({
+          term: text,
+          confidence: short ? CONFIDENCE_LATIN_SHORT : CONFIDENCE_LATIN,
+          kind: short ? 'latin-short' : 'latin',
+        });
       }
       run = null;
     };

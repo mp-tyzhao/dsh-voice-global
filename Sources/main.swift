@@ -510,6 +510,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             loginItem.title = "开机自启：等待系统允许"
         }
         menu.addItem(loginItem)
+        add(menu, title: "使用记录…", action: #selector(showUsage))
         add(menu, title: "打开日志", action: #selector(openLog))
 
         // 语料：文本永远记录，音频看 keepRecordings
@@ -920,6 +921,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
         reloadConfig()
+    }
+
+    /// 使用记录：用了多少、改了多少、学到了什么、快不快。
+    ///
+    /// 用户明确问过"我应该用的很多，能不能看到"——数据一直在本机，
+    /// 只是没有入口。这里直接读语料算，不依赖打包进去的脚本。
+    @objc private func showUsage() {
+        let entries = Recordings.allEntries()
+        guard !entries.isEmpty else {
+            showAlert(title: "还没有使用记录", body: "听写几句之后再来看看。")
+            return
+        }
+
+        var fixes = 0, trims = 0, seconds = 0.0
+        var byDay: [String: Int] = [:]
+        for entry in entries {
+            seconds += (entry["seconds"] as? Double) ?? 0
+            if let day = (entry["ts"] as? String)?.prefix(10) { byDay[String(day), default: 0] += 1 }
+            guard entry["corrected"] != nil else { continue }
+            if (entry["editKind"] as? String) == "trim" { trims += 1 } else { fixes += 1 }
+        }
+
+        let total = entries.count
+        let rate = total > 0 ? Double(fixes) / Double(total) : 0
+        let minutes = Int(seconds / 60)
+
+        var lines: [String] = []
+        lines.append("共 \(total) 条听写，累计说话 \(minutes) 分钟")
+        lines.append("")
+        lines.append("识别质量")
+        lines.append("  手动修正    \(fixes) 条（\(String(format: "%.1f", rate * 100))%）")
+        if trims > 0 { lines.append("  改主意删减  \(trims) 条（不算识别错误）") }
+        lines.append("  一次通过率  \(String(format: "%.1f", (1 - rate) * 100))%")
+
+        let learned = (try? String(contentsOf: Paths.dictionary, encoding: .utf8)) ?? ""
+        if let data = learned.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let origin = object["origin"] as? [String: Any] ?? [:]
+            let learnedTerms = origin.filter { ($0.value as? [String: Any])?["addedBy"] as? String == "learned" }.keys
+            let all = (object["terms"] as? [String]) ?? []
+            lines.append("")
+            lines.append("词表：共 \(all.count) 条，其中系统学到 \(learnedTerms.count) 条")
+            if !learnedTerms.isEmpty {
+                lines.append("  \(learnedTerms.sorted().joined(separator: "、"))")
+            }
+        }
+
+        lines.append("")
+        lines.append("按天")
+        for (day, count) in byDay.sorted(by: { $0.key < $1.key }).suffix(14) {
+            let bar = String(repeating: "█", count: max(1, min(20, count / 2)))
+            lines.append("  \(day)  \(String(format: "%3d", count))  \(bar)")
+        }
+        lines.append("")
+        lines.append("数据都在本机：~/.voice-global/recordings/")
+
+        let alert = NSAlert()
+        alert.messageText = "使用记录"
+        alert.informativeText = ""
+        alert.addButton(withTitle: "好")
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 460, height: 300))
+        let text = NSTextView(frame: scroll.bounds)
+        text.string = lines.joined(separator: "\n")
+        text.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        text.isEditable = false
+        text.isRichText = false
+        scroll.documentView = text
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        alert.accessoryView = scroll
+
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     @objc private func openDictionary() {

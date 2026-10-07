@@ -63,16 +63,22 @@ enum EditDiff {
 
     /// 判断这次编辑属于哪一类。
     ///
-    /// 光看"是不是纯删减"不够 —— `RSSI → RSI` 和 `奇绩创坛 → 奇绩创`
-    /// 都是"删掉一个字符"，但前者是修 ASR 多识别了一个字母，
-    /// 后者更可能是用户改主意不想要那个字。
+    /// 用真实数据校准过（2026-10-07，用户 7 条修订记录）：
     ///
-    /// 真正的区分信号是**删掉的量**：
-    ///   · 删一两个字 → 修错字（识别问题）
-    ///   · 删掉小半句 / 一整句 → 改主意（内容问题）
+    ///   RSSI → RSI                 识别修正（删的是拉丁词内部的字符）
+    ///   奇绩创坛 → 奇绩创          ┐
+    ///   不是我从楼顶 → 不我从楼顶    │
+    ///   地图不需要调整 → 不需要调整  ├ 全是「删掉一两个字的措辞改动」
+    ///   左右是至17.5米 → 左右是17.5米│  不是识别错误
+    ///   我现在的绿点 → 现在的绿点    ┘
     ///
-    /// 阈值取"超过 8 个字 或 超过原文 30%"。宁可把删减判成修正（顶多让
-    /// CER 保守一点），也不要反过来 —— 那会丢掉真实的修正信号。
+    /// 所以分界**不是删除的量**（第一版按"删≤8字算修正"判，把这 5 条全判错了），
+    /// 而是**删的是不是中文**：
+    ///   · 删拉丁字母（RSSI→RSI）→ 修 ASR 多识别的字符
+    ///   · 删中文字 → 用户改措辞，跟识别对不对没关系
+    ///
+    /// 宁可把改措辞判成修正（顶多让指标保守），也不要反过来 ——
+    /// 那会让 CER 和修正率都虚高，指标就不可信了。
     static func classify(before: String, after: String) -> EditKind {
         let a = Array(before)
         let b = Array(after)
@@ -86,9 +92,19 @@ enum EditDiff {
             i += 1
         }
 
-        let deleted = a.count - b.count
-        let ratio = Double(deleted) / Double(max(a.count, 1))
-        return (deleted > 8 || ratio > 0.3) ? .trim : .fix
+        // 纯删除：找出被删掉的那些字符，看里面有没有中文
+        var deleted: [Character] = []
+        var j = 0
+        for character in b {
+            while a[j] != character { deleted.append(a[j]); j += 1 }
+            j += 1
+        }
+        deleted.append(contentsOf: a[j...])
+
+        let removedCJK = deleted.contains { character in
+            character.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) }
+        }
+        return removedCJK ? .trim : .fix
     }
 
     /// 我们粘贴的那一段，在用户改完之后变成了什么样。
