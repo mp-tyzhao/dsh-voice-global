@@ -96,6 +96,8 @@ struct VoiceConfig: Codable {
     /// 留空则用默认的 sensevoice-onnx。
     /// 目录里可以放 profile.json 描述模型类型，没有就按 SenseVoice 处理。
     var modelDir = ""
+    /// 开机自启。默认开 —— 菜单栏应用重启后不自动起来，用户只会觉得"坏了"。
+    var launchAtLogin = true
     /// 可选：直接指定 ONNX 权重文件（换精度 / 换自训练权重）
     var modelPath = ""
     /// 可选：直接指定 tokens.txt
@@ -221,7 +223,7 @@ struct VoiceConfig: Codable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case language, cleanup, tapMaxSeconds, nodePath, modelRoot, modelDir, threads
+        case language, cleanup, tapMaxSeconds, nodePath, modelRoot, modelDir, launchAtLogin, threads
         case modelPath, tokensPath, vadPath
         case restoreClipboard, pasteDelayMs, restoreDelayMs, showHUD, playSounds, llm
         case idleUnloadSeconds, trimEndPunctuation, learnFromEdits
@@ -237,6 +239,7 @@ struct VoiceConfig: Codable {
         nodePath = c.fallback(.nodePath, "")
         modelRoot = c.fallback(.modelRoot, "")
         modelDir = c.fallback(.modelDir, "")
+        launchAtLogin = c.fallback(.launchAtLogin, true)
         modelPath = c.fallback(.modelPath, "")
         tokensPath = c.fallback(.tokensPath, "")
         vadPath = c.fallback(.vadPath, "")
@@ -266,6 +269,7 @@ struct VoiceConfig: Codable {
         try c.encode(nodePath, forKey: .nodePath)
         try c.encode(modelRoot, forKey: .modelRoot)
         try c.encode(modelDir, forKey: .modelDir)
+        try c.encode(launchAtLogin, forKey: .launchAtLogin)
         try c.encode(modelPath, forKey: .modelPath)
         try c.encode(tokensPath, forKey: .tokensPath)
         try c.encode(vadPath, forKey: .vadPath)

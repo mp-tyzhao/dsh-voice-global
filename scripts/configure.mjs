@@ -35,6 +35,8 @@ const DEFAULTS = {
   // 具体用哪个模型：模型根目录下的子目录名，或绝对路径。
   // 目录里可以放 profile.json 描述模型类型（senseVoice / whisper / paraformer / transducer…）
   modelDir: '',
+  // 开机自启。菜单栏应用重启后不自动起来，用户只会觉得"坏了"。
+  launchAtLogin: true,
   modelPath: '',
   tokensPath: '',
   vadPath: '',
@@ -101,6 +103,9 @@ setIf('--base-url', () => { config.llm.baseURL = value('--base-url'); });
 setIf('--model', () => { config.llm.model = value('--model'); });
 setIf('--api-key-env', () => { config.llm.apiKeyEnv = value('--api-key-env'); });
 setIf('--api-key-command', () => { config.llm.apiKeyCommand = value('--api-key-command'); });
+
+// 开机自启
+if (has('--launch-at-login')) config.launchAtLogin = (value('--launch-at-login') ?? 'true') !== 'false';
 
 // 模型选择
 if (has('--model-dir')) config.modelDir = value('--model-dir');

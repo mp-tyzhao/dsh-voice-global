@@ -330,6 +330,20 @@ node bench/accuracy.mjs --rerun --model-dir <路径>   # 换模型对比
 > 同一配置连跑三次的波动约 1.1 个百分点，所以 `--repeat 3` 是必要的 ——
 > 比噪声小的差异不要下结论（我们就在这上面栽过一次：把噪声读成了"增益有害"）。
 
+### 开机自启
+
+菜单栏应用重启后不自动起来，用户只会觉得"语音输入莫名其妙不能用了"。
+所以默认注册为登录项（macOS 13+ 的 `SMAppService.mainApp`），
+在「系统设置 → 通用 → 登录项」里可见、也能自己关掉。
+
+```bash
+"build/DSH Voice.app/Contents/MacOS/DSHVoice" --launch-at-login status   # 查状态
+"build/DSH Voice.app/Contents/MacOS/DSHVoice" --launch-at-login on|off
+```
+
+> 不写 LaunchAgent plist —— 那种方式不透明，用户找不到也删不干净。
+> `SMAppService` 是系统自己的机制，出问题能在「登录项」里看到并处理。
+
 ### 换成别的语音模型
 
 模型不是写死在代码里的。每个模型目录放一个 `profile.json` 描述它是什么类型，

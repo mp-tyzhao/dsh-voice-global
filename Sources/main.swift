@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import AVFoundation
 
 /// 全局听写控制器：Fn 单击 → 录音 → 本地转写 + 清理 → 落到当前光标处。
@@ -398,6 +399,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
             }
             self.rebuildMenu(state: .idle)
+            // 开机自启：按配置同步一次。菜单栏应用重启后不自动起来，
+            // 用户只会觉得"语音输入莫名其妙不能用了"。
+            LaunchAtLogin.apply(enabled: config.launchAtLogin)
+
             // 启动时查一次可用模型，供「语音模型」菜单使用
             self.controller?.listProfiles { [weak self] available, _ in
                 guard let self else { return }
@@ -494,6 +499,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         add(menu, title: "打开配置", action: #selector(openConfig))
         menu.addItem(buildModelMenu())
+
+        let loginItem = NSMenuItem(
+            title: LaunchAtLogin.isEnabled ? "开机自启：开" : "开机自启：关",
+            action: #selector(toggleLaunchAtLogin), keyEquivalent: ""
+        )
+        loginItem.target = self
+        loginItem.state = LaunchAtLogin.isEnabled ? .on : .off
+        if case .requiresApproval = SMAppService.mainApp.status {
+            loginItem.title = "开机自启：等待系统允许"
+        }
+        menu.addItem(loginItem)
         add(menu, title: "打开日志", action: #selector(openLog))
 
         // 语料：文本永远记录，音频看 keepRecordings
@@ -883,6 +899,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// 开机自启开关
+    @objc private func toggleLaunchAtLogin() {
+        var config = ConfigStore.load()
+        config.launchAtLogin.toggle()
+        ConfigStore.save(config)
+        // 以系统里的**实际结果**为准回写配置 ——
+        // 注册可能因为权限/位置问题失败，配置不该显示一个没生效的状态
+        let ok = LaunchAtLogin.apply(enabled: config.launchAtLogin)
+        if !ok {
+            config.launchAtLogin = LaunchAtLogin.isEnabled
+            ConfigStore.save(config)
+            showAlert(
+                title: "没能改成功",
+                body: """
+                \(LaunchAtLogin.statusDescription)
+
+                可以手动加：「系统设置 → 通用 → 登录项 → 允许在后台」里添加本应用。
+                """
+            )
+        }
+        reloadConfig()
+    }
+
     @objc private func openDictionary() {
         let path = Paths.dictionary
         if !FileManager.default.fileExists(atPath: path.path) {
@@ -996,6 +1035,7 @@ enum Diagnostics {
         lines.append("\(mark(FileManager.default.fileExists(atPath: model))) 识别模型（\(source)）：\(model)")
         lines.append("\(mark(FileManager.default.fileExists(atPath: tokens))) 词表：\(tokens)")
         lines.append("\(mark(FileManager.default.fileExists(atPath: vad))) VAD：\(vad)")
+        lines.append("\(LaunchAtLogin.isEnabled ? "✅" : "⚠️") 开机自启：\(LaunchAtLogin.statusDescription)")
         lines.append("清理模式：\(config.cleanup)")
         lines.append("润色模型：\(config.llm.enabled ? config.llm.model : "未启用")")
         let keySource: String
@@ -1277,6 +1317,20 @@ let arguments = Array(CommandLine.arguments.dropFirst())
 
 if arguments.contains("--help") || arguments.contains("-h") {
     printUsage()
+    exit(0)
+}
+
+// 自启状态的查询/开关：便于脚本验证，也便于排查"重启后没起来"
+if let index = arguments.firstIndex(of: "--launch-at-login") {
+    let action = index + 1 < arguments.count ? arguments[index + 1] : "status"
+    switch action {
+    case "on", "enable":
+        print(LaunchAtLogin.apply(enabled: true) ? "已开启：\(LaunchAtLogin.statusDescription)" : "开启失败：\(LaunchAtLogin.statusDescription)")
+    case "off", "disable":
+        print(LaunchAtLogin.apply(enabled: false) ? "已关闭" : "关闭失败")
+    default:
+        print("状态：\(LaunchAtLogin.statusDescription)")
+    }
     exit(0)
 }
 
