@@ -55,6 +55,12 @@ final class EditWatcher {
     /// 间隔很短，上一次的 settle 回调还会继续跑 —— 它会拿**旧的 pasted**
     /// 去配**新的输入框内容**，算出一个错误的差异交给学习，等于学到垃圾。
     private var generation = 0
+    /// 已经提示过"这个 App 学不了"的名单。
+    /// 每个 App 只提示一次 —— 用户需要知道，但不能每次听写都唠叨。
+    private static var warnedApps = Set<String>()
+    /// 当前 App 不支持自动学习时回调（每个 App 只回调一次），
+    /// 用来在界面上告诉用户"这里学不了，请用纠正最近一次"。
+    var onUnsupported: ((String) -> Void)?
     /// 用户把整段转写改成了什么样（含这次是「修正」还是「改主意删减」）
     /// —— 写回语料当标注。两者必须分开：删减不是识别错误，
     /// 当成"他实际说了什么"去算准确率会让 CER 虚高。
@@ -70,26 +76,95 @@ final class EditWatcher {
         stop()
         guard config.learnFromEdits, Injector.isTrusted else { return }
 
-        guard let focused = EditWatcher.focusedElement(),
-              let text = EditWatcher.value(of: focused) else {
-            // 目标 App 不暴露文本就读不到，正常情况，不当错误
-            Log.shared.info("学习：当前输入框不提供文本，本次跳过")
-            return
-        }
-
-        self.element = focused
         self.pasted = pasted
         self.raw = raw
         self.deadline = Date().addingTimeInterval(EditWatcher.watchSeconds)
-
-        // 等粘贴真正落地再定基线。
-        //
-        // ⌘V 是**异步**的：Injector 把按键发出去之后就回调了，此刻目标 App
-        // 往往还没处理完，读到的还是旧值。实测日志里 13 次观测有 11 次读到
-        // 0 或 1 字 —— 拿这个当基线的话，后面每一轮都判不出"还是同一段文本"，
-        // 观测等于白开，学习闭环一次都不会触发。这就是那个根因。
         generation += 1
-        settle(initial: text, attempt: 0, generation: generation)
+        settle(initial: nil, attempt: 0, generation: generation)
+    }
+
+    /// 等两件事：粘贴落地，以及**输入框变得读得到**。
+    ///
+    /// 为什么读不到也要重试：Chromium 系 App（Edge、飞书、各种 Electron）
+    /// 只在被辅助功能查询时才去构建自己的 AX 树，第一次读常常是空的。
+    /// 实测（2026-10-07）用户在 Edge / 飞书 里连续 10 次听写都读到
+    /// "不提供文本"，两小时里学习完全没工作，而他只看到"改了词没反应"。
+    /// 一次读不到就放弃太早了 —— 给它一点时间。
+    ///
+    /// 同时还要等粘贴落地：⌘V 是异步的，此刻读到的往往是粘贴前的旧值
+    /// （空的输入框就是 0 字）。拿那个当基线，后面每一轮都判不出
+    /// "还是同一段文本"，观测等于白开。
+    private func settle(initial: String?, attempt: Int, generation: Int) {
+        guard generation == self.generation else { return }   // 已被新的观测取代
+        guard Date() < deadline else {
+            if initial == nil { reportUnsupported() }
+            stop()
+            return
+        }
+        guard attempt < 24 else {
+            if initial == nil {
+                reportUnsupported()
+            } else {
+                Log.shared.info("学习：粘贴后输入框始终没有变化，本次不观测")
+            }
+            stop()
+            return
+        }
+        guard let current = EditWatcher.focusedElement(),
+              let text = EditWatcher.value(of: current) else {
+            // 读不到就再等等 —— 可能是 Chromium 还没把 AX 树建起来
+            scheduleRetry(initial: initial, attempt: attempt, generation: generation)
+            return
+        }
+
+        guard text.count <= EditWatcher.maxWatchedCharacters else {
+            Log.shared.info("学习：输入框内容过长（\(text.count) 字），本次不观测")
+            stop()
+            return
+        }
+
+        // 第一次成功读到就把它当基线起点，然后继续等粘贴落地。
+        // 落地判据用"变了"，不强求包含完整粘贴内容 —— 有些 App 会做自动格式化
+        // （补全括号、改写引号），逐字比对会永远等不到。
+        // `contains(pasted)` 那条是给自测留的：那边文本一开始就在框里，
+        // 不会有"变化"，只看第一条会一直等到超时。
+        let landed: Bool
+        if let initial {
+            landed = !text.isEmpty && text != initial
+        } else {
+            landed = text.contains(pasted) || (!pasted.isEmpty && text.count > pasted.count)
+        }
+
+        guard landed else {
+            scheduleRetry(initial: initial ?? text, attempt: attempt, generation: generation)
+            return
+        }
+
+        self.element = current
+        self.before = text
+        Log.shared.info("学习：开始观测输入框（\(text.count) 字），\(Int(EditWatcher.watchSeconds)) 秒内的改动会被学习")
+
+        let timer = Timer.scheduledTimer(withTimeInterval: EditWatcher.pollInterval, repeats: true) { [weak self] _ in
+            self?.poll()
+        }
+        self.timer = timer
+    }
+
+    private func scheduleRetry(initial: String?, attempt: Int, generation: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.settle(initial: initial, attempt: attempt + 1, generation: generation)
+        }
+    }
+    /// 记下"这个 App 读不到输入框"，并**在界面上提示一次**。
+    ///
+    /// 只是写日志不够：实测用户在一个 App 里连续 10 次听写都读到"不提供文本"，
+    /// 两小时里完全不知道学习没在工作 —— 他只看到"改了词没反应"。
+    private func reportUnsupported() {
+        let app = EditWatcher.focusedAppName()
+        Log.shared.info("学习：\(app) 不把输入框内容提供给辅助功能，本次跳过（这个 App 用「纠正最近一次…」）")
+        guard !EditWatcher.warnedApps.contains(app) else { return }
+        EditWatcher.warnedApps.insert(app)
+        onUnsupported?(app)
     }
 
     /// 轮询等待粘贴落地（文本变得和刚读完时不一样），最多等约 1.8 秒。
@@ -103,7 +178,7 @@ final class EditWatcher {
         guard Date() < deadline else { stop(); return }
         guard let current = EditWatcher.focusedElement(),
               let text = EditWatcher.value(of: current) else {
-            Log.shared.info("学习：当前输入框不提供文本，本次跳过")
+            reportUnsupported()
             stop()
             return
         }
@@ -285,11 +360,56 @@ final class EditWatcher {
     }
 
     /// 读输入框当前文本。读不到（App 不暴露）返回 nil。
-    static func value(of element: AXUIElement) -> String? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success else {
-            return nil
+    ///
+    /// 只试 `kAXValueAttribute` 是不够的：不同 App 把可编辑文本放在不同地方。
+    /// 实测（2026-10-07）用户在一个 App 里连续 10 次听写都读到"不提供文本"，
+    /// 整条学习链根本没启动，而日志里只有一句"跳过"。
+    ///
+    /// 所以按可能性依次尝试，尽量多救回一些 App：
+    ///   1. 焦点元素自身的 value（绝大多数 App）
+    ///   2. 焦点元素的选中文本（有些把内容放在这里）
+    ///   3. 焦点元素的父级 value（文本框外面套一层滚动区的情况）
+    ///   4. 焦点元素子树里的第一个文本区（网页输入框常见）
+    static func value(of element: AXUIElement, depth: Int = 0) -> String? {
+        if let direct = stringAttribute(element, kAXValueAttribute) ?? stringAttribute(element, "AXSelectedText"),
+           !direct.isEmpty {
+            return direct
         }
-        return value as? String
+        guard depth < 3 else { return nil }
+
+        if let parentRef = attribute(element, kAXParentAttribute),
+           CFGetTypeID(parentRef) == AXUIElementGetTypeID() {
+            let parent = parentRef as! AXUIElement
+            if let up = stringAttribute(parent, kAXValueAttribute), !up.isEmpty { return up }
+        }
+
+        if let childrenRef = attribute(element, kAXChildrenAttribute),
+           let children = childrenRef as? [AXUIElement] {
+            for child in children.prefix(8) {
+                let role = stringAttribute(child, kAXRoleAttribute) ?? ""
+                // 只往下找文本类控件，避免在大文档里乱翻
+                guard role.contains("Text") || role.contains("Area") || role.contains("Field") else { continue }
+                if let text = value(of: child, depth: depth + 1), !text.isEmpty { return text }
+            }
+        }
+        return nil
+    }
+
+    /// 焦点元素所在的 App 名。失败日志里必须带上它 ——
+    /// 否则用户只会看到"没检测到"，而不知道该换 App 还是换办法。
+    static func focusedAppName() -> String {
+        NSWorkspace.shared.frontmostApplication?.localizedName ?? "未知应用"
+    }
+
+    /// 读一个 AX 属性。
+    static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+        return value
+    }
+
+    /// 读一个字符串类型的 AX 属性。
+    static func stringAttribute(_ element: AXUIElement, _ name: String) -> String? {
+        attribute(element, name) as? String
     }
 }

@@ -17,8 +17,8 @@ import ApplicationServices
 //   HOME=/tmp/vg-selftest "DSH Voice.app/Contents/MacOS/DSHVoice" --learn-selftest
 
 final class LearnSelfTestDelegate: NSObject, NSApplicationDelegate {
-    private var window: NSWindow!
-    private var textView: NSTextView!
+    fileprivate var window: NSWindow!
+    fileprivate var textView: NSTextView!
     private var sidecar: Sidecar!
     private var watcher: EditWatcher!
     private var stages: [(String, Bool)] = []
@@ -56,6 +56,20 @@ final class LearnSelfTestDelegate: NSObject, NSApplicationDelegate {
         sidecar = Sidecar()
         watcher = EditWatcher(config: config, sidecar: sidecar)
         watcher.verbose = true   // 自测时把每次轮询的判断都记下来
+
+        // 反复把焦点抢回来。
+        // 自测跑在别人的机器上，Edge / 飞书 / 终端随时可能把焦点抢走，
+        // 而观测读的是"系统级焦点元素" —— 焦点一跑就读到别的 App 去了，
+        // 自测于是偶发失败（实测 3 次里挂 2 次），看起来像代码有问题。
+        // 这不是产品缺陷，但会让自测结果不可信，所以主动维持焦点。
+        Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
+            guard let self, let window = self.window else { return }
+            if !window.isKeyWindow {
+                NSApp.activate(ignoringOtherApps: true)
+                window.makeKeyAndOrderFront(nil)
+                window.makeFirstResponder(self.textView)
+            }
+        }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [self] in
             runPhaseOne()
@@ -154,11 +168,25 @@ final class LearnSelfTestDelegate: NSObject, NSApplicationDelegate {
         print()
         if failed == 0 {
             print("ALL PASS（学习闭环端到端可用）")
-        } else {
-            print("\(failed) 项失败")
+            fflush(stdout)
+            exit(0)
         }
+
+        // 失败时先确认是不是环境干扰：观测读的是"系统级焦点元素"，
+        // 别的 App 把焦点抢走时会读到它、于是自测必然失败。
+        // 那不是产品缺陷，但也不该谎报成功 —— 单独报"无法判定"。
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        let isUs = frontmost?.processIdentifier == ProcessInfo.processInfo.processIdentifier
+        if !isUs {
+            print("\(failed) 项失败 —— 但焦点被「\(frontmost?.localizedName ?? "别的 App")」抢走了")
+            print("无法判定（重跑一次，或先退出其他 App）")
+            fflush(stdout)
+            exit(2)
+        }
+
+        print("\(failed) 项失败（焦点一直在本应用内，说明是真问题）")
         fflush(stdout)
-        exit(failed == 0 ? 0 : 1)
+        exit(1)
     }
 
     /// 读待定区，验证低置信度候选确实被记下来了

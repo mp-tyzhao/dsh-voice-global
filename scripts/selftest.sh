@@ -42,6 +42,12 @@ STATUS=${PIPESTATUS[0]}
 set -e
 
 echo
+case "$STATUS" in
+  0) : ;;
+  2) echo "  结果：无法判定（焦点被别的 App 抢走，不是产品问题）。重跑一次即可。" ;;
+  *) echo "  结果：真的有失败，看上面的 FAIL 行。" ;;
+esac
+echo
 echo "落盘检查："
 echo "  词表   $(cat "${SANDBOX}/.voice-global/dictionary.json" 2>/dev/null | tr -d '\n' | head -c 160)"
 echo "  待定区 $(cat "${SANDBOX}/.voice-global/learning-pending.json" 2>/dev/null | tr -d '\n' | head -c 80)"

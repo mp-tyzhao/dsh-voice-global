@@ -83,6 +83,14 @@ final class VoiceController {
         let watcher = EditWatcher(config: config, sidecar: sidecar)
         // 学到词一定要让用户看见 —— 否则他不知道系统在变聪明，也不知道该不该纠正。
         // 提示措辞按"用户想知道什么"来写：学到了哪个词、下次会怎么处理。
+        // 这个 App 学不了就说一声 —— 每个 App 只提示一次，不唠叨
+        watcher.onUnsupported = { [weak self] app in
+            self?.hud.flash(
+                title: "\(app) 里学不到",
+                detail: "它不把输入框内容提供给辅助功能。改用菜单「学习 → 纠正最近一次…」",
+                seconds: 5.0
+            )
+        }
         watcher.onLearned = { [weak self] added, pending in
             guard let self else { return }
             if !added.isEmpty {
@@ -541,6 +549,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         learnToggle.state = controller.config.learnFromEdits ? .on : .off
         learningMenu.addItem(learnToggle)
 
+        let recentItem = NSMenuItem(title: "从最近记录里挑一条纠正…", action: #selector(correctRecent), keyEquivalent: "")
+        recentItem.target = self
+        learningMenu.addItem(recentItem)
+
         let correctItem = NSMenuItem(title: "纠正最近一次…", action: #selector(correctLast), keyEquivalent: "")
         correctItem.target = self
         learningMenu.addItem(correctItem)
@@ -623,58 +635,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let alert = NSAlert()
-        alert.messageText = "纠正最近一次听写"
-        alert.informativeText = """
-        下面是识别结果，改成你实际说的样子。
-        我会从中提取你的专有名词，下次就认得它们了。
-
-        原文：\(last.raw)
-        """
-        alert.addButton(withTitle: "记下来")
-        alert.addButton(withTitle: "取消")
-
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 460, height: 110))
-        let editor = NSTextView(frame: scroll.bounds)
-        editor.string = last.text
-        editor.font = .systemFont(ofSize: 13)
-        editor.isRichText = false
-        editor.autoresizingMask = [.width]
-        scroll.documentView = editor
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-        alert.accessoryView = scroll
-
-        NSApp.activate(ignoringOtherApps: true)
-        alert.window.initialFirstResponder = editor
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        let corrected = editor.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !corrected.isEmpty, corrected != last.text else {
-            Log.shared.info("纠正：没有改动，跳过")
-            return
-        }
-
-        // 1. 写回语料当标注（评测与回归都靠它）。
-        //    手工纠正也分两类：删掉一句是改主意，不是识别错误。
-        let kind = EditDiff.classify(before: last.text, after: corrected)
-        Recordings.applyCorrection(ts: last.ts, corrected: corrected, kind: kind.rawValue)
-
-        // 2. 学习：用 raw 对照 corrected，抽出用户真正用的词
-        controller?.learn(raw: last.raw, corrected: corrected) { [weak self] added, pending in
-            guard let self else { return }
-            if !added.isEmpty {
-                self.showAlert(title: "学到 \(added.count) 个词", body: added.joined(separator: "、"))
-            } else if !pending.isEmpty {
-                self.showAlert(
-                    title: "记住了 \(pending.count) 个词",
-                    body: "\(pending.joined(separator: "、"))\n\n它们是单字替换推出来的，边界可能是猜的。再遇到一次就正式生效 —— 想立刻生效可以直接加进词表。"
-                )
-            } else {
-                self.showAlert(title: "记下了", body: "这次没有提取到新的专有名词（改动可能只是措辞或标点）。")
-            }
-            Log.shared.info("手工纠正学习：生效 \(added.joined(separator: "、"))；待确认 \(pending.joined(separator: "、"))")
-        }
+        // 复用同一条编辑路径，避免两处逻辑漂移
+        editTranscript(ts: last.ts, raw: last.raw, text: last.text)
     }
 
     /// 检查学习功能对当前 App 管不管用。
@@ -816,6 +778,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 title: added.isEmpty ? "没有新词" : "导入 \(added.count) 个词",
                 body: added.isEmpty ? "这些词原本就在词表里。" : added.joined(separator: "、")
             )
+        }
+    }
+
+    /// 从最近几条听写里挑一条来纠正。
+    ///
+    /// 自动捕获依赖辅助功能读得到输入框 —— 有些 App（实测有）不给读，
+    /// 那条修订就抓不到。这时用户需要一条**不依赖 AX 的补救路径**：
+    /// 自己从最近记录里挑出那一条，改一遍，同样能进学习循环。
+    ///
+    /// 原先只有「纠正最近一次…」，可你发现问题时往往已经又听写了好几句。
+    @objc private func correctRecent() {
+        let entries = Recordings.allEntries().suffix(12).reversed()
+        let candidates = entries.compactMap { entry -> (String, String, String)? in
+            guard let ts = entry["ts"] as? String,
+                  let raw = entry["raw"] as? String,
+                  let text = entry["text"] as? String, !text.isEmpty else { return nil }
+            return (ts, raw, text)
+        }
+        guard !candidates.isEmpty else {
+            showAlert(title: "还没有可纠正的记录", body: "先说一句再来。")
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "挑一条来纠正"
+        alert.informativeText = "选一条听写记录，把它改成你实际说的样子。学到的词会进词表。"
+        alert.addButton(withTitle: "下一步")
+        alert.addButton(withTitle: "取消")
+
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 480, height: 26), pullsDown: false)
+        for (index, item) in candidates.enumerated() {
+            let time = item.0.suffix(9).prefix(5)   // HH:mm
+            let preview = item.2.count > 42 ? String(item.2.prefix(42)) + "…" : item.2
+            popup.addItem(withTitle: "\(time)  \(preview)")
+            popup.lastItem?.tag = index
+        }
+        alert.accessoryView = popup
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let picked = candidates[max(0, min(popup.indexOfSelectedItem, candidates.count - 1))]
+        editTranscript(ts: picked.0, raw: picked.1, text: picked.2)
+    }
+
+    /// 弹出可编辑框改一条转写，确认后写回语料并学习。
+    private func editTranscript(ts: String, raw: String, text: String) {
+        let alert = NSAlert()
+        alert.messageText = "纠正这条听写"
+        alert.informativeText = "原文：\(raw)"
+        alert.addButton(withTitle: "记下来")
+        alert.addButton(withTitle: "取消")
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 460, height: 110))
+        let editor = NSTextView(frame: scroll.bounds)
+        editor.string = text
+        editor.font = .systemFont(ofSize: 13)
+        editor.isRichText = false
+        scroll.documentView = editor
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        alert.accessoryView = scroll
+
+        NSApp.activate(ignoringOtherApps: true)
+        alert.window.initialFirstResponder = editor
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let corrected = editor.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !corrected.isEmpty, corrected != text else { return }
+
+        let kind = EditDiff.classify(before: text, after: corrected)
+        Recordings.applyCorrection(ts: ts, corrected: corrected, kind: kind.rawValue)
+
+        controller?.learn(raw: raw, corrected: corrected) { [weak self] added, pending in
+            guard let self else { return }
+            if !added.isEmpty {
+                self.showAlert(title: "学到 \(added.count) 个词", body: added.joined(separator: "、"))
+            } else if !pending.isEmpty {
+                self.showAlert(
+                    title: "记住了 \(pending.count) 个词",
+                    body: "\(pending.joined(separator: "、"))\n\n再遇到一次就正式生效。"
+                )
+            } else {
+                self.showAlert(title: "记下了", body: "这次没有提取到新的专有名词。")
+            }
         }
     }
 
