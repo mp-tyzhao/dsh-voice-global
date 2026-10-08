@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import ServiceManagement
 import AVFoundation
 
@@ -67,6 +68,8 @@ final class VoiceController {
         sidecar.learn(raw: raw, corrected: corrected, config: config, completion: completion)
     }
     private let hud = HUD()
+    private var secureInputTimer: Timer?
+    private var secureInputWasOn = false
     /// 录音中的每秒回调（用来在菜单栏上显示时长）。
     /// 浮窗在屏幕底部，容易被忽略、也可能落在别的屏上；
     /// 菜单栏图标永远在同一位置，是"现在是不是在录音"最可靠的指示。
@@ -226,6 +229,43 @@ final class VoiceController {
     func notify(title: String, detail: String) {
         guard config.showHUD else { return }
         hud.flash(title: title, detail: detail, seconds: 2.2)
+    }
+
+
+    // MARK: - 安全输入监测
+
+    /// 「安全输入」（Secure Event Input）是 macOS 的全局开关：**任何 App 打开它，
+    /// 所有事件 tap 就收不到键盘事件** —— 我们的 Fn 监听会直接变瞎，
+    /// 用户看到的现象是"按 Fn 完全没反应"。
+    ///
+    /// 实测（2026-10-08）用户报"飞书里语音输入不好用"，查了几轮都不是辅助功能、
+    /// 不是阻塞、也不是我的改动 —— 是 `IsSecureEventInputEnabled()` 当时为真。
+    /// 常见触发者：带密码框的 App、某些 IM 的聊天输入、终端里跑需要密码的命令。
+    ///
+    /// 这个状态我们改不了（是系统的安全机制），但**必须让用户知道**，
+    /// 否则他只会以为软件坏了。所以一旦检测到就明确告诉他原因。
+    func watchSecureInput() {
+        secureInputTimer?.invalidate()
+        secureInputTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.checkSecureInput()
+        }
+    }
+
+    private func checkSecureInput() {
+        let on = IsSecureEventInputEnabled()
+        guard on != secureInputWasOn else { return }
+        secureInputWasOn = on
+        if on {
+            Log.shared.info("安全输入已开启：Fn 事件会被系统挡住，期间按 Fn 无反应")
+            hud.flash(
+                title: "Fn 暂时不灵",
+                detail: "有 App 打开了系统「安全输入」，它会挡住 Fn。切到别的 App、或退出那个 App 就好",
+                seconds: 6
+            )
+        } else {
+            Log.shared.info("安全输入已关闭：Fn 恢复")
+            hud.flash(title: "Fn 恢复", detail: "系统安全输入已关闭", seconds: 2)
+        }
     }
 
     // MARK: - 录音
@@ -416,6 +456,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // 开机自启：按配置同步一次。菜单栏应用重启后不自动起来，
             // 用户只会觉得"语音输入莫名其妙不能用了"。
             LaunchAtLogin.apply(enabled: config.launchAtLogin)
+            controller.watchSecureInput()
 
             // 启动时查一次可用模型，供「语音模型」菜单使用
             self.controller?.listProfiles { [weak self] available, _ in
