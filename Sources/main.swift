@@ -280,10 +280,13 @@ final class VoiceController {
         }
         let what = ["不执行任何操作", "切换输入法", "显示表情与符号", "开始听写"][min(usage, 3)]
         Log.shared.error("Fn 被系统绑成了「\(what)」，会和听写抢这个键")
+        // **必须提醒重启。** Apple 官方文档（macos-defaults 实测 Sonoma）写明
+        // 这个设置"需要重启 Mac 才生效"。实测：改完立刻按 Fn 照旧切输入法，
+        // 重启 TextInputMenuAgent 也没用 —— 因为读它的是登录时那一次。
         hud.flash(
             title: "Fn 被系统占用了",
             detail: "「按下 Fn 键时」现在是「\(what)」，按 Fn 会同时触发它。"
-                + "去「系统设置 → 键盘 → 按下 🌐 键时」改成「不执行任何操作」",
+                + "改成「不执行任何操作」后**要重启电脑**才生效",
             seconds: 8
         )
     }
