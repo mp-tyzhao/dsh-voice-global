@@ -39,8 +39,19 @@ final class LearnSelfTestDelegate: NSObject, NSApplicationDelegate {
         var config = ConfigStore.load()
         config.learnFromEdits = true
 
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 140),
-                          styleMask: [.titled], backing: .buffered, defer: false)
+        // 尽量不碍事：小窗口、贴屏幕右下角、可关闭、标题写明会自动关。
+        // 它必须抢焦点才能测 AX 读取，所以只能把视觉干扰降到最低 ——
+        // 用户报过"自测弹窗影响我用电脑"。
+        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let size = NSSize(width: 380, height: 96)
+        window = NSWindow(
+            contentRect: NSRect(x: screen.maxX - size.width - 24,
+                                y: screen.minY + 24,
+                                width: size.width, height: size.height),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false
+        )
+        window.title = "DSH Voice 自测（约 15 秒，会自动关掉）"
+        window.level = .floating
         window.title = "学习闭环自测"
         let scroll = NSScrollView(frame: window.contentView!.bounds)
         scroll.autoresizingMask = [.width, .height]

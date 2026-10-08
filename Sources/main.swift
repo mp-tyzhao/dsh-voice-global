@@ -654,8 +654,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showAlert(title: "缺少辅助功能权限", body: "系统设置 → 隐私与安全性 → 辅助功能 → 勾选 DSH Voice")
             return
         }
+        // 先声明辅助功能再读 —— 这一步是让 Chromium 系（Electron/Edge/飞书）
+        // 构建输入框的关键。不声明的话它们一律报"读不到"。
+        let app = EditWatcher.focusedAppName()
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        EditWatcher.announceAccessibility(to: pid)
+
         guard let element = EditWatcher.focusedElement() else {
-            showAlert(title: "光标不在输入框里", body: "把光标放进你想测的那个 App 的输入框，再点一次这个菜单。")
+            showAlert(
+                title: "拿不到焦点元素",
+                body: "当前应用：\(app)\n\n把光标放进输入框，再点一次这个菜单。"
+            )
             return
         }
         var roleRef: CFTypeRef?
@@ -667,6 +676,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showAlert(
                 title: tooLong ? "能读到，但内容过长" : "这个 App 可以自动学习",
                 body: """
+                当前应用：\(app)
                 控件类型：\(role)
                 当前内容：\(text.count) 字
 
@@ -679,7 +689,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showAlert(
                 title: "这个 App 不暴露输入框内容",
                 body: """
+                当前应用：\(app)
                 控件类型：\(role)
+
+                已经向它声明过辅助功能（AXManualAccessibility），仍然读不到 ——
+                说明它不是 Chromium 系按需建树的问题，而是自绘控件（微信这类）。
 
                 它没有把文本提供给辅助功能接口，自动学习在这里不生效
                 （部分 Electron 应用、终端、某些网页输入框都这样）。

@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# 自测会**弹出窗口并抢走键盘焦点**（它需要真实的系统焦点才能测 AX 读取），
+# 大约 15 秒。用户正在用电脑时这很讨厌，所以必须显式确认：
+#   VOICE_GLOBAL_SELFTEST_OK=1 ./scripts/selftest.sh
+if [ "${VOICE_GLOBAL_SELFTEST_OK:-0}" != "1" ]; then
+  echo "这个自测会弹窗并抢焦点约 15 秒。"
+  echo "确实要跑就加前缀：VOICE_GLOBAL_SELFTEST_OK=1 $0"
+  exit 3
+fi
+
 # 学习闭环端到端自测
 # ==================
 #

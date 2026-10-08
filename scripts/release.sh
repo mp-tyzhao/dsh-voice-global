@@ -21,6 +21,7 @@ cd "$ROOT"
 
 MODE="${1:-release}"
 DRY_RUN=0
+WITH_SELFTEST=0
 [ "$MODE" = "--dry-run" ] && DRY_RUN=1
 ONLY_CHECK=0
 [ "$MODE" = "--check" ] && ONLY_CHECK=1

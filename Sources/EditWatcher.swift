@@ -110,12 +110,15 @@ final class EditWatcher {
             stop()
             return
         }
-        guard let current = EditWatcher.focusedElement(),
-              let text = EditWatcher.value(of: current) else {
-            // 读不到就再等等 —— 可能是 Chromium 还没把 AX 树建起来
+        // 读不到就"重新声明 + 再读一次"，还不行才等下一轮。
+        // 声明那一步是让 Chromium 系（Electron/Edge/飞书）建树的关键。
+        let read = EditWatcher.readFocusedText() ?? EditWatcher.readFocusedTextAfterReannounce()
+        guard let read else {
             scheduleRetry(initial: initial, attempt: attempt, generation: generation)
             return
         }
+        let current = read.element
+        let text = read.text
 
         guard text.count <= EditWatcher.maxWatchedCharacters else {
             Log.shared.info("学习：输入框内容过长（\(text.count) 字），本次不观测")
@@ -142,7 +145,9 @@ final class EditWatcher {
 
         self.element = current
         self.before = text
-        Log.shared.info("学习：开始观测输入框（\(text.count) 字），\(Int(EditWatcher.watchSeconds)) 秒内的改动会被学习")
+        // 成功也记 App 名 —— 之前只有失败才记，导致"哪些 App 读得到"
+        // 事后完全查不出来（日志里 73 次成功一个 App 名都没有）。
+        Log.shared.info("学习：开始观测「\(EditWatcher.focusedAppName())」输入框（\(text.count) 字），\(Int(EditWatcher.watchSeconds)) 秒内的改动会被学习")
 
         let timer = Timer.scheduledTimer(withTimeInterval: EditWatcher.pollInterval, repeats: true) { [weak self] _ in
             self?.poll()
@@ -357,6 +362,78 @@ final class EditWatcher {
         guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &value) == .success,
               let element = value, CFGetTypeID(element) == AXUIElementGetTypeID() else { return nil }
         return (element as! AXUIElement)
+    }
+
+    /// 已经打过招呼的 App（按 pid）。Electron 记住之后不用每次重设。
+    private static var announcedPids = Set<pid_t>()
+
+    /// 告诉目标 App「有辅助技术在用，请把你的输入框暴露出来」。
+    ///
+    /// ## 为什么必须做这一步
+    ///
+    /// Chromium 系（Electron、Edge、飞书、各种桌面端）默认**不构建辅助功能树** ——
+    /// 它们只在检测到辅助技术时才建。Electron 官方文档写明：
+    /// 第三方软件可以通过设置 `AXManualAccessibility` 属性来打开它。
+    ///
+    /// 我们原先只读不设，所以这些 App 的输入框内容根本拿不到。实测日志里
+    /// 同一个 App 20 秒内一好一坏（累计读得到 73 次 / 读不到 16 次），
+    /// 正是"按需建树、闲置就关"的特征。
+    ///
+    /// 只设一次（按 pid 记账）：Electron 会记住，反复设只是浪费。
+    /// App 重启后 pid 会变，自然重新声明。
+    static func announceAccessibility(to pid: pid_t) {
+        guard pid > 0 else { return }
+        // **绝不向自己声明。**
+        //
+        // 实测踩过：对自己设 AXEnhancedUserInterface 之后，自测里
+        // focusedElement() 开始间歇性返回 nil（"拿不到焦点元素"）——
+        // 那个属性会改变 App 自身的 AX 行为，设在自己身上是自伤。
+        guard pid != ProcessInfo.processInfo.processIdentifier else { return }
+        guard !announcedPids.contains(pid) else { return }
+        announcedPids.insert(pid)
+
+        let app = AXUIElementCreateApplication(pid)
+        let manual = AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "pid \(pid)"
+        if manual == .success {
+            Log.shared.info("已向「\(name)」声明辅助功能（Chromium 系会据此构建输入框）")
+        }
+        // 失败不记日志：非 Chromium 的 App 本来就不认这个属性（返回
+        // attributeUnsupported = -25205 是正常的），每次都记会刷屏。
+    }
+
+    /// 读取失败后忘掉这个 App 的声明记录，下一轮重新声明一次。
+    ///
+    /// 场景：App 在我们声明之后重启了（pid 变了但记账还在）、
+    /// 或者它自己把树关了。重新声明一次的代价很小。
+    static func forgetAnnouncement(for pid: pid_t) {
+        announcedPids.remove(pid)
+    }
+
+    /// 读当前焦点输入框：先声明辅助功能，再读。
+    ///
+    /// 这是所有读取路径的统一入口 —— 把"声明"和"读取"绑在一起，
+    /// 避免有人漏掉声明那一步又回到"读不到 Electron 输入框"的老问题。
+    ///
+    /// @returns (元素, 文本)；读不到返回 nil
+    static func readFocusedText() -> (element: AXUIElement, text: String)? {
+        let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        announceAccessibility(to: frontPid)
+
+        guard let element = focusedElement(), let text = value(of: element) else { return nil }
+        return (element, text)
+    }
+
+    /// 读失败后的补救：忘掉声明记录、重新声明，再读一次。
+    ///
+    /// 有些 App（尤其 Chromium 系）在我们第一次声明之前就已经把树关掉了，
+    /// 或者中间重启过。重新声明一次往往就能读到。
+    static func readFocusedTextAfterReannounce() -> (element: AXUIElement, text: String)? {
+        let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        forgetAnnouncement(for: frontPid)
+        announceAccessibility(to: frontPid)
+        guard let element = focusedElement(), let text = value(of: element) else { return nil }
+        return (element, text)
     }
 
     /// 读输入框当前文本。读不到（App 不暴露）返回 nil。
