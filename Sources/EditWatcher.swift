@@ -400,10 +400,8 @@ final class EditWatcher {
         // 声明只是"打个招呼"，凭什么让核心录音流程陪它等。
         announceQueue.async {
             let app = AXUIElementCreateApplication(pid)
-            // 给这个元素的 AX 调用封顶 1 秒。默认超时很长，
-            // 目标无响应时会把我们拖到天荒地老。
-            AXUIElementSetMessagingTimeout(app, 1.0)
-            AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+            // 和别处一样封顶 —— 目标无响应时不能把我们拖到天荒地老
+            AXUIElementSetAttributeValue(bounded(app), "AXManualAccessibility" as CFString, kCFBooleanTrue)
         }
     }
 
