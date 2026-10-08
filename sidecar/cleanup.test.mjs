@@ -3,7 +3,7 @@
  *
  * 覆盖：语气词删除、重复合并、口头自我修正、标点规整、幂等性、误删防护。
  */
-import { clean, trimEndPunctuation } from './cleanup.mjs';
+import { clean, trimEndPunctuation, softenMidSentencePeriods } from './cleanup.mjs';
 
 const cases = [
   // [输入, 期望输出, 说明]
@@ -82,5 +82,45 @@ for (const [input, expected] of trimCases) {
 }
 
 
-console.log(`\n${failed === 0 ? 'ALL PASS' : `${failed} FAILED`} (${cases.length + idempotentSources.length + 1 + trimCases.length} 项)`);
+
+// ── 句中停顿被识别成句号 ────────────────────────────────────────────────
+// 全部来自用户 2026-10-08 的真实抱怨与新旧对比
+console.log('\n— 句中停顿被识别成句号 —');
+const softenCases = [
+  ['帮我再看一看最近的。手动校正怎么又乱了？', '帮我再看一看最近的，手动校正怎么又乱了？', '短停顿改逗号'],
+  ['现在的问题是标点符号识别得不太对。比如我上一句话。帮我看看', '现在的问题是标点符号识别得不太对。比如我上一句话，帮我看看', '只改短的那处'],
+  ['都是些什么乱七八糟的东西。既没有读项目文档，一个一个项目过', '都是些什么乱七八糟的东西。既没有读项目文档，一个一个项目过', '真句末不动'],
+  ['好。我们开始吧。', '好。我们开始吧。', '太短的不动（好）'],
+  // 下面这几条是第一次全量回归（136 条真实录音）暴露出来的反例：
+  // 阈值下界 4 时它们被误改，句号本来是对的
+  ['这是第一条。第二才是。目前我们看到的一些好的选题', '这是第一条。第二才是。目前我们看到的一些好的选题', '4~5 字短句不动'],
+  ['补齐逻辑。我们要严格的按照齐的观点', '补齐逻辑。我们要严格的按照齐的观点', '短句不动（补齐逻辑）'],
+  ['准备回忆。从这5个会议记录里', '准备回忆。从这5个会议记录里', '短句不动（准备回忆）'],
+  ['基于这些。我们有的东西', '基于这些。我们有的东西', '短句不动（基于这些）'],
+  // 6 字以上该改的仍要改
+  ['今晚给你一个任务。是确保明天早上8点半', '今晚给你一个任务，是确保明天早上8点半', '6 字以上该改'],
+];
+let softenFailed = 0;
+for (const [input, expected, label] of softenCases) {
+  const got = softenMidSentencePeriods(input).text;
+  const ok = got === expected;
+  if (!ok) { failed++; softenFailed++; }
+  console.log(`${ok ? 'PASS' : 'FAIL'}  断句: ${label} → ${JSON.stringify(got)}`);
+}
+for (const [input, expected, label] of [
+  ['一句话，没有句号', '一句话，没有句号', '没有句号时原样返回'],
+  ['', '', '空串不崩'],
+]) {
+  const got = softenMidSentencePeriods(input).text;
+  const ok = got === expected;
+  if (!ok) { failed++; softenFailed++; }
+  console.log(`${ok ? 'PASS' : 'FAIL'}  断句: ${label}`);
+}
+{
+  const ok = softenMidSentencePeriods('先把这一段写完。再把那一段补齐。最后检查一遍').softened === 2;
+  if (!ok) { failed++; softenFailed++; }
+  console.log(`${ok ? 'PASS' : 'FAIL'}  断句: 多个短停顿都改`);
+}
+
+console.log(`\n${failed === 0 ? 'ALL PASS' : `${failed} FAILED`} (${cases.length + idempotentSources.length + 1 + trimCases.length + softenCases.length + 3} 项)`);
 process.exit(failed === 0 ? 0 : 1);

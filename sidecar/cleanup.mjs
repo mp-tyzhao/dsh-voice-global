@@ -217,6 +217,62 @@ function normalizePunctuation(text) {
  * @param {string} text
  * @returns {string}
  */
+/**
+ * 把「句中停顿被识别成句号」的地方改成逗号。
+ *
+ * 为什么需要确定性规则而不是只靠提示词：实测让 LLM 自己判断会两头出错 ——
+ * 要么不改（用户报的"中间来了个句号"），要么把**正确的**句号也改成逗号
+ * （"都是些什么乱七八糟的东西。既没有读项目文档…" 被合成一句）。
+ *
+ * 判据来自真实语句的对比：
+ *   帮我再看一看最近的。手动校正怎么又乱了？      ← 前面 9 字，是停顿
+ *   都是些什么乱七八糟的东西。既没有读项目文档…    ← 前面 13 字，是真句末
+ *
+ * 阈值（4~10 → 6~10）是全量回归调出来的，不是拍的：
+ * 第一次用 4~10 跑 136 条真实录音，21 条有变化，其中 5 条明显不该改 ——
+ * "这是第一条。第二才是。目前…"、"补齐逻辑。我们要严格的…"、
+ * "准备回忆。从这5个会议记录里…"、"基于这些。我们有的东西…"。
+ * 它们恰好都是 4~5 字的**完整短句**，句号是对的。
+ * 下界提到 6 之后，这 5 条不动，其余该改的全保留（含"今晚给你一个任务。是确保…"）。
+ *
+ *   · 短于 6 字不动 —— "好。"、"这是第一条。" 这类短句句号是对的
+ *   · 长于 10 字不动 —— "都是些什么乱七八糟的东西。"（12 字）是真的句末
+ *
+ * @param {string} text
+ * @returns {{text: string, softened: number}}
+ */
+export function softenMidSentencePeriods(text) {
+  if (!text) return { text, softened: 0 };
+  const parts = text.split('。');
+  if (parts.length < 2) return { text, softened: 0 };
+
+  let softened = 0;
+  const rebuilt = [];
+  // 只处理"句号 + 后面还有内容"的位置；末尾那个句号原样保留，
+  // 由 trimEndPunctuation 去裁 —— 这里丢掉它会造成两处职责重叠。
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    rebuilt.push(parts[index]);
+
+    // 后面已经是空串 → 这个句号在结尾，不参与判断
+    if (parts[index + 1] === '') {
+      rebuilt.push('。');
+      continue;
+    }
+
+    // 从上一个标点算起的那一段
+    const segment = parts[index].split(/[，、；：！？,;:!?]/u).pop() ?? '';
+    const length = [...segment].length;
+    if (length >= 6 && length <= 10) {
+      rebuilt.push('，');
+      softened += 1;
+    } else {
+      rebuilt.push('。');
+    }
+  }
+  rebuilt.push(parts[parts.length - 1]);
+  return { text: rebuilt.join(''), softened };
+}
+
 export function trimEndPunctuation(text) {
   return String(text ?? '')
     .replace(/[\s\u3000]+$/u, '')

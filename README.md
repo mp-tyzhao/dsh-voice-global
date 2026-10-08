@@ -316,6 +316,28 @@ node bench/accuracy.mjs --rerun       # 准确率：算真实 CER
 
 前三个加起来不到一分钟，改完随手跑一遍。
 
+#### 改了规则一定要跑全量回归
+
+**这是硬要求**：任何确定性规则（断句、清理、替换）改完，必须拿**语料里全部录音**
+跑一遍对比，不能只看几个例子就下判断。
+
+```bash
+# 1. 改之前存基线
+node bench/regression.mjs --cleanup rules --save bench/baseline-rules.json
+# 2. 改代码
+# 3. 对比 —— 逐条列出输出变化
+node bench/regression.mjs --cleanup rules --compare bench/baseline-rules.json
+```
+
+用 `--cleanup rules` 而不是 `llm`：规则路径没有 LLM 波动，
+**任何输出差异都归因于这次改动本身**。
+
+> 为什么必须这样：改断句规则时我先只对了两个例子就动手，全量一跑 136 条里
+> 21 条变了，其中 5 条明显不该改（"这是第一条。第二才是。目前…"）。
+> 只看例子会把这种改动放进去。调阈值之后降到 17 条，逐条审完才合。
+>
+> `scripts/release.sh` 会把这一步做成发布前检查：有基线就必须无差异。
+
 #### 准确率
 
 ```bash

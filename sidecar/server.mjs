@@ -29,7 +29,7 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
-import { clean, trimEndPunctuation } from './cleanup.mjs';
+import { clean, trimEndPunctuation, softenMidSentencePeriods } from './cleanup.mjs';
 import { polish, isPlausible } from './llm.mjs';
 import { loadTerms, renderVocabularyPrompt, stripFabricatedTerms } from './dictionary.mjs';
 import { applyTerms, selectRelevantTerms } from './phonetic.mjs';
@@ -446,6 +446,17 @@ async function handle({ wavPath, language = DEFAULT_LANGUAGE, cleanup = 'rules' 
             hits = [...hits, ...guarded.removed.map((term) => `fabricated:${term}`)];
           }
 
+          // 句中的停顿被识别成句号 —— LLM 判断不稳（要么不改、要么把正确的
+          // 句号也改掉），所以补一条确定性规则兜底。
+          const softened = process.env.VOICE_GLOBAL_NO_SOFTEN_PUNCT === '1'
+            ? { text, softened: 0 }
+            : softenMidSentencePeriods(text);
+          if (softened.softened > 0) {
+            log(`断句修正：${softened.softened} 处句中句号改为逗号`);
+            text = softened.text;
+            hits = [...hits, 'punctuation'];
+          }
+
           // 最后再兜一次拼音层：模型可能把已经改对的词又写回去了
           if (vocabulary.terms.length) {
             const afterLLM = applyTerms(text, vocabulary.terms);
@@ -461,6 +472,22 @@ async function handle({ wavPath, language = DEFAULT_LANGUAGE, cleanup = 'rules' 
         timings.llm = Math.round(performance.now() - t2);
         polishError = String(error?.message ?? error);
       }
+    }
+  }
+
+  // 句中的停顿被识别成句号 —— LLM 判断不稳（要么不改、要么把正确的句号
+  // 也改成逗号，实测两头都错），所以补一条确定性规则兜底。
+  //
+  // 放在公共出口而不是 LLM 分支里：rules 模式同样该生效；而且它不依赖 LLM，
+  // 可以用 --cleanup rules 做**确定性回归对比** —— 没有 LLM 波动，
+  // 任何输出差异都归因于这次改动本身。
+  if (cleanup !== 'off' && text && process.env.VOICE_GLOBAL_NO_SOFTEN_PUNCT !== '1') {
+    const softened = softenMidSentencePeriods(text);
+    if (softened.softened > 0) {
+      log(`断句修正：${softened.softened} 处句中句号改为逗号`);
+      text = softened.text;
+      hits = [...hits, 'punctuation'];
+      if (rulesText) rulesText = softenMidSentencePeriods(rulesText).text;
     }
   }
 

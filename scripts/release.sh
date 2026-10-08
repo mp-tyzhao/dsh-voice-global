@@ -83,6 +83,23 @@ ok "sidecar 模块齐全（含 profiles.mjs）"
   || die "缺 sherpa-onnx 原生库（npm install 有时会把它挪成嵌套布局，检查顶层那份还在不在）"
 ok "原生依赖齐全"
 
+# ── 4.5 全量回归对比（用户明确要求）────────────────────────────────────────
+# "改了规则一定要用过去所有的录音回归测试，不确定就不要合。"
+# 基线文件由 bench/regression.mjs --save 生成；有基线就必须跑对比且无差异。
+BASELINE="$ROOT/bench/baseline-rules.json"
+if [ -f "$BASELINE" ]; then
+  echo "  跑全量回归对比（$BASELINE）…"
+  if node bench/regression.mjs --cleanup rules --compare "$BASELINE" >/tmp/vg-regression.log 2>&1; then
+    ok "全量回归：输出无变化"
+  else
+    tail -30 /tmp/vg-regression.log | sed 's/^/      /'
+    die "全量回归有输出变化。逐条确认是不是预期内的；不确定就不要发。"
+  fi
+else
+  warn "没有回归基线（$BASELINE）。改过规则的话先跑："
+  warn "  node bench/regression.mjs --cleanup rules --save bench/baseline-rules.json"
+fi
+
 # ── 5. 评测没退化 ──────────────────────────────────────────────────────────
 if [ -f bench/labels.jsonl ]; then
   COUNT=$(grep -c . bench/labels.jsonl || echo 0)
