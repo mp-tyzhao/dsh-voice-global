@@ -358,6 +358,8 @@ final class EditWatcher {
 
     static func focusedElement() -> AXUIElement? {
         let system = AXUIElementCreateSystemWide()
+        // 焦点元素查询同样封顶 1 秒 —— 目标 App 卡住时不能把主线程拖死
+        AXUIElementSetMessagingTimeout(system, 1.0)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &value) == .success,
               let element = value, CFGetTypeID(element) == AXUIElementGetTypeID() else { return nil }
@@ -383,24 +385,32 @@ final class EditWatcher {
     /// App 重启后 pid 会变，自然重新声明。
     static func announceAccessibility(to pid: pid_t) {
         guard pid > 0 else { return }
-        // **绝不向自己声明。**
-        //
-        // 实测踩过：对自己设 AXEnhancedUserInterface 之后，自测里
-        // focusedElement() 开始间歇性返回 nil（"拿不到焦点元素"）——
-        // 那个属性会改变 App 自身的 AX 行为，设在自己身上是自伤。
+        // **绝不向自己声明**（会改变自身的 AX 行为，自伤）。
         guard pid != ProcessInfo.processInfo.processIdentifier else { return }
         guard !announcedPids.contains(pid) else { return }
         announcedPids.insert(pid)
 
-        let app = AXUIElementCreateApplication(pid)
-        let manual = AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-        let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "pid \(pid)"
-        if manual == .success {
-            Log.shared.info("已向「\(name)」声明辅助功能（Chromium 系会据此构建输入框）")
+        // **必须异步，而且必须设超时。**
+        //
+        // 血泪教训：第一版在主线程上同步调用 AXUIElementSetAttributeValue，
+        // 目标是另一个 App —— 它一忙，这个调用就长时间不返回，主线程跟着卡死。
+        // 后果是：
+        //   · 第二次按 Fn 的事件处理不到 → 结束不了录音
+        //   · 飞书里整条链路卡住 → 语音输入直接失效
+        // 声明只是"打个招呼"，凭什么让核心录音流程陪它等。
+        announceQueue.async {
+            let app = AXUIElementCreateApplication(pid)
+            // 给这个元素的 AX 调用封顶 1 秒。默认超时很长，
+            // 目标无响应时会把我们拖到天荒地老。
+            AXUIElementSetMessagingTimeout(app, 1.0)
+            AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         }
-        // 失败不记日志：非 Chromium 的 App 本来就不认这个属性（返回
-        // attributeUnsupported = -25205 是正常的），每次都记会刷屏。
     }
+
+    /// 声明用的后台队列（串行，避免同时对多个 App 写属性）。
+    private static let announceQueue = DispatchQueue(
+        label: "ai.deepseek.dsh.voice.announce", qos: .utility
+    )
 
     /// 读取失败后忘掉这个 App 的声明记录，下一轮重新声明一次。
     ///
@@ -415,6 +425,7 @@ final class EditWatcher {
     /// 排查"读不到内容"时最有用的一步：能直接看出对方是
     /// 「根本没暴露」还是「暴露在别的属性上」。
     static func attributeNames(of element: AXUIElement) -> [String] {
+        bounded(element)
         var names: CFArray?
         guard AXUIElementCopyAttributeNames(element, &names) == .success,
               let list = names as? [String] else { return [] }
@@ -423,6 +434,7 @@ final class EditWatcher {
 
     /// 读一段区间内的文本。网页输入框（Chromium 系）有时只认这条路。
     static func stringForRange(of element: AXUIElement, location: Int, length: Int) -> String? {
+        bounded(element)
         var range = CFRange(location: location, length: length)
         guard let rangeValue = AXValueCreate(.cfRange, &range) else { return nil }
         var result: CFTypeRef?
@@ -496,6 +508,7 @@ final class EditWatcher {
     ///   3. 焦点元素的父级 value（文本框外面套一层滚动区的情况）
     ///   4. 焦点元素子树里的第一个文本区（网页输入框常见）
     static func value(of element: AXUIElement, depth: Int = 0) -> String? {
+        bounded(element)
         if let direct = anyText(of: element, allowRangedLookup: depth == 0) { return direct }
         guard depth < 3 else { return nil }
 
@@ -523,8 +536,25 @@ final class EditWatcher {
         NSWorkspace.shared.frontmostApplication?.localizedName ?? "未知应用"
     }
 
+    /// 跨进程 AX 调用的超时（秒）。
+    ///
+    /// 这些调用都是在主线程上做的，目标 App 卡住时会**把主线程一起拖死**。
+    /// 实测后果：按 Fn 结束不了录音、飞书里语音输入失效。
+    /// 1 秒足够任何正常 App 响应，又不至于让人等。
+    /// 0.5 秒：正常 App 的 AX 调用是毫秒级，这个值给足了余量；
+    /// 卡住的 App 最多让我们等半秒，而不是拖死整条录音流程。
+    private static let axTimeout: Float = 0.5
+
+    /// 给元素设上超时再操作。
+    @discardableResult
+    static func bounded(_ element: AXUIElement) -> AXUIElement {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        return element
+    }
+
     /// 读一个 AX 属性。
     static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        bounded(element)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
         return value
