@@ -384,25 +384,22 @@ final class EditWatcher {
     /// 只设一次（按 pid 记账）：Electron 会记住，反复设只是浪费。
     /// App 重启后 pid 会变，自然重新声明。
     static func announceAccessibility(to pid: pid_t) {
-        guard pid > 0 else { return }
-        // **绝不向自己声明**（会改变自身的 AX 行为，自伤）。
-        guard pid != ProcessInfo.processInfo.processIdentifier else { return }
-        guard !announcedPids.contains(pid) else { return }
-        announcedPids.insert(pid)
-
-        // **必须异步，而且必须设超时。**
+        // **已回退，不要重新打开。**
         //
-        // 血泪教训：第一版在主线程上同步调用 AXUIElementSetAttributeValue，
-        // 目标是另一个 App —— 它一忙，这个调用就长时间不返回，主线程跟着卡死。
-        // 后果是：
-        //   · 第二次按 Fn 的事件处理不到 → 结束不了录音
-        //   · 飞书里整条链路卡住 → 语音输入直接失效
-        // 声明只是"打个招呼"，凭什么让核心录音流程陪它等。
-        announceQueue.async {
-            let app = AXUIElementCreateApplication(pid)
-            // 和别处一样封顶 —— 目标无响应时不能把我们拖到天荒地老
-            AXUIElementSetAttributeValue(bounded(app), "AXManualAccessibility" as CFString, kCFBooleanTrue)
-        }
+        // 曾经在这里对目标 App 写 AXManualAccessibility，想让 Chromium 系
+        // （Electron/Edge/飞书）构建无障碍树，从而能读到它们的输入框。
+        //
+        // 结果：**飞书的语音输入直接被弄坏**（用户报告"上午还正常"，
+        // 下午就不好用了），而且不是阻塞问题 —— 改成后台异步 + 0.5 秒超时
+        // 之后依然不好用。说明是那个属性本身改变了对方 App 的行为。
+        //
+        // 教训：**为了"读"去写另一个 App 的内部开关，代价太大。**
+        // 读取失败顶多是学不到词，用「从最近记录里挑一条纠正…」能补；
+        // 但把用户的输入法弄坏是不可接受的。所以这个功能不值得。
+        //
+        // 保留空实现是为了让调用点不必散落判断，将来若要用别的手段
+        // 解决 Electron 读取问题，从这里换实现即可。
+        _ = pid
     }
 
     /// 声明用的后台队列（串行，避免同时对多个 App 写属性）。
@@ -453,18 +450,10 @@ final class EditWatcher {
     static func anyText(of element: AXUIElement, allowRangedLookup: Bool = true) -> String? {
         if let text = stringAttribute(element, kAXValueAttribute), !text.isEmpty { return text }
         if let text = stringAttribute(element, "AXSelectedText"), !text.isEmpty { return text }
-        guard allowRangedLookup else { return nil }
-        if let raw = attribute(element, "AXNumberOfCharacters"), let count = raw as? Int, count > 0 {
-            if let text = stringForRange(of: element, location: 0, length: min(count, EditWatcher.maxWatchedCharacters + 1)) {
-                return text
-            }
-        }
-        // 有些实现把文本放在 AXStringForRange 里，却不肯报字符数。
-        // 只问到"我们能处理的上限 + 1"：够判断是否过长就行，不去拉整个大文档。
-        if let text = stringForRange(of: element, location: 0, length: EditWatcher.maxWatchedCharacters + 1),
-           !text.isEmpty {
-            return text
-        }
+        // 这里曾经还试过 AXStringForRange（网页输入框有时只认这条路），
+        // 一并撤掉了 —— 它也是新增的跨进程读取。回退到今早已知可用的行为，
+        // 先把可用性拿回来，再谈扩展读取范围。
+        _ = allowRangedLookup
         return nil
     }
 
