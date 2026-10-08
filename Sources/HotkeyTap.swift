@@ -85,6 +85,16 @@ final class HotkeyTap {
 
         if type == .flagsChanged {
             let isFnDown = event.flags.contains(.maskSecondaryFn)
+            // **记录每一次 Fn 状态变化，并带上前台 App。**
+            //
+            // 这一行是为了回答一个反复困扰我们的问题：某个 App 里"按 Fn 没反应"，
+            // 到底是事件没到我们这里，还是到了但后面的流程断了？
+            // 之前日志只在"判定为一次有效单击"时记，事件没到就完全无声，
+            // 只能靠猜（而我为此猜错了四轮）。带上前台 App 名之后，
+            // 看一眼日志就知道答案。
+            if isFnDown != fnDown {
+                Log.shared.info("Fn \(isFnDown ? "按下" : "松开")（前台：\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?")）")
+            }
             if isFnDown && !fnDown {
                 fnDown = true
                 fnDownAt = Date()
