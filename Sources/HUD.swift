@@ -22,7 +22,14 @@ final class HUD {
         levelBar?.level = 0
         cancelPendingHide()
 
-        if let screen = NSScreen.main {
+        // 放在**鼠标所在的那块屏幕**上。
+        //
+        // 原先固定用 NSScreen.main（键盘焦点屏）。接了外接显示器之后，
+        // 用户看着的那块屏可能不是 main —— 浮窗就"消失"了（其实在另一块屏上）。
+        // 鼠标位置是"用户此刻在看哪"的最好近似。
+        let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }
+            ?? NSScreen.main
+        if let screen {
             let frame = screen.visibleFrame
             let origin = CGPoint(
                 x: frame.midX - width / 2,
@@ -32,10 +39,25 @@ final class HUD {
         }
         panel.alphaValue = 1
         panel.orderFrontRegardless()
+
+        // 记日志：浮窗"看不见"时要能区分是没显示、还是显示在别处
+        Log.shared.info("浮窗：\(title) → \(Int(panel.frame.origin.x)),\(Int(panel.frame.origin.y)) "
+            + "屏 \(Int(screen?.frame.width ?? 0))x\(Int(screen?.frame.height ?? 0)) "
+            + "可见=\(panel.isVisible) 屏数=\(NSScreen.screens.count)")
     }
 
     func setLevel(_ level: Float) {
         levelBar?.level = level
+        // 录音期间顺带确认浮窗还在。
+        //
+        // 用户报过"浮窗没了，看不到是不是在输入"，重启才好 —— 但产品不能靠重启。
+        // 系统休眠唤醒、别的 App 抢占、或者我们自己某处误隐藏，都会让它消失，
+        // 而那时用户正在说话，恰恰最需要看到它。
+        // 这个函数在录音期间每秒被调用 30 次，拿它当自愈点几乎不花代价。
+        guard let panel, !panel.isVisible else { return }
+        panel.alphaValue = 1
+        panel.orderFrontRegardless()
+        Log.shared.info("浮窗：被隐藏了，已重新显示")
     }
 
     /// 显示一个短暂的成功/失败提示后自动隐藏。

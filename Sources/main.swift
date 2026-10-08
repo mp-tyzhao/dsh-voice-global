@@ -67,6 +67,12 @@ final class VoiceController {
         sidecar.learn(raw: raw, corrected: corrected, config: config, completion: completion)
     }
     private let hud = HUD()
+    /// 录音中的每秒回调（用来在菜单栏上显示时长）。
+    /// 浮窗在屏幕底部，容易被忽略、也可能落在别的屏上；
+    /// 菜单栏图标永远在同一位置，是"现在是不是在录音"最可靠的指示。
+    var onRecordingTick: ((Int) -> Void)?
+    private var recordingSeconds = 0
+    private var recordingStartedAt: Date?
     private var hotkey: HotkeyTap
     private var levelTimer: Timer?
     private var idleTimer: Timer?
@@ -1462,6 +1468,29 @@ if arguments.contains("--check") {
 
 // 学习功能依赖「读得到焦点输入框的文本」。这个命令用来验证某个 App 支不支持：
 // 把光标放进那个 App 的输入框，再跑它。
+// 浮窗自检：显示几秒，确认放得出来、位置在哪。
+// 用户报"浮窗没了"时，先跑这个把"没显示"和"显示在别处"分开。
+if arguments.contains("--hud-test") {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let hud = HUD()
+    hud.show(title: "浮窗测试", detail: "看到这个说明能显示 · 5 秒后消失", recording: true)
+    for level in stride(from: Float(0), through: 1, by: 0.1) {
+        hud.setLevel(level)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+    RunLoop.current.run(until: Date().addingTimeInterval(4))
+    hud.hide()
+    for (index, screen) in NSScreen.screens.enumerated() {
+        let frame = screen.frame
+        print("屏 \(index + 1)：\(Int(frame.width))x\(Int(frame.height)) 原点(\(Int(frame.origin.x)),\(Int(frame.origin.y)))"
+            + (screen == NSScreen.main ? "  [main]" : ""))
+    }
+    print("鼠标位置：\(Int(NSEvent.mouseLocation.x)),\(Int(NSEvent.mouseLocation.y))")
+    print("浮窗位置：中下偏上 96pt")
+    exit(0)
+}
+
 if arguments.contains("--learn-selftest") {
     // 需要一个真正的 GUI 上下文：辅助功能读取、窗口焦点都要它
     let selfTestApp = NSApplication.shared
