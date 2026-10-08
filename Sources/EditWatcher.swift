@@ -410,6 +410,54 @@ final class EditWatcher {
         announcedPids.remove(pid)
     }
 
+    /// 列出这个元素**真正提供**的辅助功能属性名。
+    ///
+    /// 排查"读不到内容"时最有用的一步：能直接看出对方是
+    /// 「根本没暴露」还是「暴露在别的属性上」。
+    static func attributeNames(of element: AXUIElement) -> [String] {
+        var names: CFArray?
+        guard AXUIElementCopyAttributeNames(element, &names) == .success,
+              let list = names as? [String] else { return [] }
+        return list.sorted()
+    }
+
+    /// 读一段区间内的文本。网页输入框（Chromium 系）有时只认这条路。
+    static func stringForRange(of element: AXUIElement, location: Int, length: Int) -> String? {
+        var range = CFRange(location: location, length: length)
+        guard let rangeValue = AXValueCreate(.cfRange, &range) else { return nil }
+        var result: CFTypeRef?
+        let error = AXUIElementCopyParameterizedAttributeValue(
+            element, kAXStringForRangeParameterizedAttribute as CFString, rangeValue, &result
+        )
+        guard error == .success, let text = result as? String, !text.isEmpty else { return nil }
+        return text
+    }
+
+    /// 把元素上能读到的文本相关属性全试一遍，返回第一个非空结果。
+    ///
+    /// 不同实现把文本放在不同地方：原生控件用 AXValue，
+    /// 网页输入框有时只认 AXStringForRange。一条一条试比猜一个靠谱。
+    /// @param allowRangedLookup 是否允许用 AXStringForRange 去问一大段文本。
+    ///        这条路在大文档上代价很高，所以只在焦点元素本身（depth 0）上试；
+    ///        递归找子元素时只用轻量属性，免得在大文档里翻页翻到卡住。
+    static func anyText(of element: AXUIElement, allowRangedLookup: Bool = true) -> String? {
+        if let text = stringAttribute(element, kAXValueAttribute), !text.isEmpty { return text }
+        if let text = stringAttribute(element, "AXSelectedText"), !text.isEmpty { return text }
+        guard allowRangedLookup else { return nil }
+        if let raw = attribute(element, "AXNumberOfCharacters"), let count = raw as? Int, count > 0 {
+            if let text = stringForRange(of: element, location: 0, length: min(count, EditWatcher.maxWatchedCharacters + 1)) {
+                return text
+            }
+        }
+        // 有些实现把文本放在 AXStringForRange 里，却不肯报字符数。
+        // 只问到"我们能处理的上限 + 1"：够判断是否过长就行，不去拉整个大文档。
+        if let text = stringForRange(of: element, location: 0, length: EditWatcher.maxWatchedCharacters + 1),
+           !text.isEmpty {
+            return text
+        }
+        return nil
+    }
+
     /// 读当前焦点输入框：先声明辅助功能，再读。
     ///
     /// 这是所有读取路径的统一入口 —— 把"声明"和"读取"绑在一起，
@@ -448,10 +496,7 @@ final class EditWatcher {
     ///   3. 焦点元素的父级 value（文本框外面套一层滚动区的情况）
     ///   4. 焦点元素子树里的第一个文本区（网页输入框常见）
     static func value(of element: AXUIElement, depth: Int = 0) -> String? {
-        if let direct = stringAttribute(element, kAXValueAttribute) ?? stringAttribute(element, "AXSelectedText"),
-           !direct.isEmpty {
-            return direct
-        }
+        if let direct = anyText(of: element, allowRangedLookup: depth == 0) { return direct }
         guard depth < 3 else { return nil }
 
         if let parentRef = attribute(element, kAXParentAttribute),

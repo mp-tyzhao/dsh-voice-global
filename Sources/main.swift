@@ -660,6 +660,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
         EditWatcher.announceAccessibility(to: pid)
 
+        // 声明之后给 Chromium 一点建树时间再读。
+        // 实测：声明完立刻读，只拿得到 role（AXTextArea），value 是空的 ——
+        // 树还没建完。这里转几圈等它。
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+
         guard let element = EditWatcher.focusedElement() else {
             showAlert(
                 title: "拿不到焦点元素",
@@ -686,6 +691,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 """
             )
         } else {
+            let names = EditWatcher.attributeNames(of: element)
+            Log.shared.info("学习诊断：「\(app)」控件 \(role)，可用属性 \(names.joined(separator: ", "))")
             showAlert(
                 title: "这个 App 不暴露输入框内容",
                 body: """
