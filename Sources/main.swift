@@ -70,6 +70,7 @@ final class VoiceController {
     private let hud = HUD()
     private var secureInputTimer: Timer?
     private var secureInputWasOn = false
+    private var fnUsageWas = -1
     /// 录音中的每秒回调（用来在菜单栏上显示时长）。
     /// 浮窗在屏幕底部，容易被忽略、也可能落在别的屏上；
     /// 菜单栏图标永远在同一位置，是"现在是不是在录音"最可靠的指示。
@@ -248,7 +249,43 @@ final class VoiceController {
         secureInputTimer?.invalidate()
         secureInputTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.checkSecureInput()
+            self?.checkFnConflict()
         }
+        checkFnConflict()
+    }
+
+    /// 读系统里「按下 🌐/Fn 键时」的设置。
+    ///
+    ///   0 = 不执行任何操作（我们要的）
+    ///   1 = 切换输入法  ← 会和听写抢 Fn
+    ///   2 = 显示表情与符号
+    ///   3 = 开始听写
+    ///
+    /// 实测（2026-10-08）用户报"输入法切换和语音输入同时被激发了"，
+    /// 就是这里为 1：按一下 Fn，系统弹输入法切换器、我们同时开始录音。
+    /// 我们的 tap 是 listenOnly，拦不住系统那一份，只能靠这个设置让开。
+    private func fnUsageType() -> Int {
+        (CFPreferencesCopyAppValue(
+            "AppleFnUsageType" as CFString, "com.apple.HIToolbox" as CFString
+        ) as? Int) ?? 0
+    }
+
+    private func checkFnConflict() {
+        let usage = fnUsageType()
+        guard usage != fnUsageWas else { return }
+        fnUsageWas = usage
+        guard usage != 0 else {
+            Log.shared.info("Fn 键已归听写独占（系统「按下 Fn 键时」= 不执行任何操作）")
+            return
+        }
+        let what = ["不执行任何操作", "切换输入法", "显示表情与符号", "开始听写"][min(usage, 3)]
+        Log.shared.error("Fn 被系统绑成了「\(what)」，会和听写抢这个键")
+        hud.flash(
+            title: "Fn 被系统占用了",
+            detail: "「按下 Fn 键时」现在是「\(what)」，按 Fn 会同时触发它。"
+                + "去「系统设置 → 键盘 → 按下 🌐 键时」改成「不执行任何操作」",
+            seconds: 8
+        )
     }
 
     private func checkSecureInput() {
