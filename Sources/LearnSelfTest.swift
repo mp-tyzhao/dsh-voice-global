@@ -52,7 +52,6 @@ final class LearnSelfTestDelegate: NSObject, NSApplicationDelegate {
         )
         window.title = "DSH Voice 自测（约 15 秒，会自动关掉）"
         window.level = .floating
-        window.title = "学习闭环自测"
         let scroll = NSScrollView(frame: window.contentView!.bounds)
         scroll.autoresizingMask = [.width, .height]
         textView = NSTextView(frame: scroll.bounds)

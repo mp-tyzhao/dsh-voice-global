@@ -28,7 +28,11 @@ final class EditWatcher {
     /// 25 秒太短了 —— 实测：用户 16:01:02 粘贴，25 秒窗口在 16:01:27 结束，
     /// 而他 16:01:30 就开始了下一次听写，改动正好落在窗口外。人读完再改需要时间。
     /// VoiceInk 用的是 60 秒，这里跟它对齐。
-    private static let watchSeconds: TimeInterval = 60
+    ///
+    /// 不是 `private`：菜单提示和诊断文案都从这里取值。
+    /// 曾经三处各写各的（代码 60 秒、菜单 60 秒、弹窗 25 秒），
+    /// 用户看到的和实际发生的对不上 —— 这种不一致不该靠人记得同步。
+    static let watchSeconds: TimeInterval = 60
     private static let pollInterval: TimeInterval = 1.2
     /// 输入框内容超过这个长度就不观测。
     /// 每 1.2 秒读一次全文、还要做一次前后缀比较，编辑器里开着几 MB 文档时
@@ -36,7 +40,6 @@ final class EditWatcher {
     static let maxWatchedCharacters = 20_000
 
     private var timer: Timer?
-    private var element: AXUIElement?
     private var before: String = ""
     private var pasted: String = ""
     private var raw: String = ""
@@ -112,12 +115,11 @@ final class EditWatcher {
         }
         // 读不到就"重新声明 + 再读一次"，还不行才等下一轮。
         // 声明那一步是让 Chromium 系（Electron/Edge/飞书）建树的关键。
-        let read = EditWatcher.readFocusedText() ?? EditWatcher.readFocusedTextAfterReannounce()
+        let read = EditWatcher.readFocusedText()
         guard let read else {
             scheduleRetry(initial: initial, attempt: attempt, generation: generation)
             return
         }
-        let current = read.element
         let text = read.text
 
         guard text.count <= EditWatcher.maxWatchedCharacters else {
@@ -143,7 +145,6 @@ final class EditWatcher {
             return
         }
 
-        self.element = current
         self.before = text
         // 成功也记 App 名 —— 之前只有失败才记，导致"哪些 App 读得到"
         // 事后完全查不出来（日志里 73 次成功一个 App 名都没有）。
@@ -172,56 +173,11 @@ final class EditWatcher {
         onUnsupported?(app)
     }
 
-    /// 轮询等待粘贴落地（文本变得和刚读完时不一样），最多等约 1.8 秒。
-    private func settle(initial: String, attempt: Int, generation: Int) {
-        guard generation == self.generation else { return }   // 已被新的观测取代
-        guard attempt < 12 else {
-            Log.shared.info("学习：粘贴后输入框始终没有变化，本次不观测")
-            stop()
-            return
-        }
-        guard Date() < deadline else { stop(); return }
-        guard let current = EditWatcher.focusedElement(),
-              let text = EditWatcher.value(of: current) else {
-            reportUnsupported()
-            stop()
-            return
-        }
-
-        // 落地判据用"变了"，不强求包含完整粘贴内容 —— 有些 App 会做自动格式化
-        // （补全括号、改写引号），逐字比对会永远等不到。
-        //
-        // 另一条 `contains(pasted)` 是给自测留的：那边文本已经在框里了，
-        // 不会有"变化"，只看第一条会一直等到超时。
-        let landed = (!text.isEmpty && text != initial) || text.contains(pasted)
-        guard landed else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                self?.settle(initial: initial, attempt: attempt + 1, generation: generation)
-            }
-            return
-        }
-
-        guard text.count <= EditWatcher.maxWatchedCharacters else {
-            Log.shared.info("学习：输入框内容过长（\(text.count) 字），本次不观测")
-            stop()
-            return
-        }
-
-        self.element = current
-        self.before = text
-        Log.shared.info("学习：开始观测输入框（\(text.count) 字），\(Int(EditWatcher.watchSeconds)) 秒内的改动会被学习")
-
-        let timer = Timer.scheduledTimer(withTimeInterval: EditWatcher.pollInterval, repeats: true) { [weak self] _ in
-            self?.poll()
-        }
-        self.timer = timer
-    }
 
     func stop() {
         generation += 1          // 作废所有在途的 settle 重试
         timer?.invalidate()
         timer = nil
-        element = nil
         before = ""
         // 这里**不能**清 pasted / raw：
         // poll() 的流程是 stop() 之后才调 handleChange，而 handleChange 要用
@@ -290,7 +246,6 @@ final class EditWatcher {
         // 是 --learn-selftest 把它逼出来的 —— 光靠真实使用永远只会看到"没反应"。
         let previous = before
         let latest = now
-        element = current
         stop()
         handleChange(from: previous, to: latest)
     }
@@ -366,9 +321,6 @@ final class EditWatcher {
         return (element as! AXUIElement)
     }
 
-    /// 已经打过招呼的 App（按 pid）。Electron 记住之后不用每次重设。
-    private static var announcedPids = Set<pid_t>()
-
     /// 告诉目标 App「有辅助技术在用，请把你的输入框暴露出来」。
     ///
     /// ## 为什么必须做这一步
@@ -402,19 +354,6 @@ final class EditWatcher {
         _ = pid
     }
 
-    /// 声明用的后台队列（串行，避免同时对多个 App 写属性）。
-    private static let announceQueue = DispatchQueue(
-        label: "ai.deepseek.dsh.voice.announce", qos: .utility
-    )
-
-    /// 读取失败后忘掉这个 App 的声明记录，下一轮重新声明一次。
-    ///
-    /// 场景：App 在我们声明之后重启了（pid 变了但记账还在）、
-    /// 或者它自己把树关了。重新声明一次的代价很小。
-    static func forgetAnnouncement(for pid: pid_t) {
-        announcedPids.remove(pid)
-    }
-
     /// 列出这个元素**真正提供**的辅助功能属性名。
     ///
     /// 排查"读不到内容"时最有用的一步：能直接看出对方是
@@ -427,33 +366,13 @@ final class EditWatcher {
         return list.sorted()
     }
 
-    /// 读一段区间内的文本。网页输入框（Chromium 系）有时只认这条路。
-    static func stringForRange(of element: AXUIElement, location: Int, length: Int) -> String? {
-        bounded(element)
-        var range = CFRange(location: location, length: length)
-        guard let rangeValue = AXValueCreate(.cfRange, &range) else { return nil }
-        var result: CFTypeRef?
-        let error = AXUIElementCopyParameterizedAttributeValue(
-            element, kAXStringForRangeParameterizedAttribute as CFString, rangeValue, &result
-        )
-        guard error == .success, let text = result as? String, !text.isEmpty else { return nil }
-        return text
-    }
-
     /// 把元素上能读到的文本相关属性全试一遍，返回第一个非空结果。
     ///
     /// 不同实现把文本放在不同地方：原生控件用 AXValue，
     /// 网页输入框有时只认 AXStringForRange。一条一条试比猜一个靠谱。
-    /// @param allowRangedLookup 是否允许用 AXStringForRange 去问一大段文本。
-    ///        这条路在大文档上代价很高，所以只在焦点元素本身（depth 0）上试；
-    ///        递归找子元素时只用轻量属性，免得在大文档里翻页翻到卡住。
-    static func anyText(of element: AXUIElement, allowRangedLookup: Bool = true) -> String? {
+    static func anyText(of element: AXUIElement) -> String? {
         if let text = stringAttribute(element, kAXValueAttribute), !text.isEmpty { return text }
         if let text = stringAttribute(element, "AXSelectedText"), !text.isEmpty { return text }
-        // 这里曾经还试过 AXStringForRange（网页输入框有时只认这条路），
-        // 一并撤掉了 —— 它也是新增的跨进程读取。回退到今早已知可用的行为，
-        // 先把可用性拿回来，再谈扩展读取范围。
-        _ = allowRangedLookup
         return nil
     }
 
@@ -464,21 +383,7 @@ final class EditWatcher {
     ///
     /// @returns (元素, 文本)；读不到返回 nil
     static func readFocusedText() -> (element: AXUIElement, text: String)? {
-        let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
-        announceAccessibility(to: frontPid)
-
-        guard let element = focusedElement(), let text = value(of: element) else { return nil }
-        return (element, text)
-    }
-
-    /// 读失败后的补救：忘掉声明记录、重新声明，再读一次。
-    ///
-    /// 有些 App（尤其 Chromium 系）在我们第一次声明之前就已经把树关掉了，
-    /// 或者中间重启过。重新声明一次往往就能读到。
-    static func readFocusedTextAfterReannounce() -> (element: AXUIElement, text: String)? {
-        let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
-        forgetAnnouncement(for: frontPid)
-        announceAccessibility(to: frontPid)
+        beginRead()
         guard let element = focusedElement(), let text = value(of: element) else { return nil }
         return (element, text)
     }
@@ -496,7 +401,7 @@ final class EditWatcher {
     ///   4. 焦点元素子树里的第一个文本区（网页输入框常见）
     static func value(of element: AXUIElement, depth: Int = 0) -> String? {
         bounded(element)
-        if let direct = anyText(of: element, allowRangedLookup: depth == 0) { return direct }
+        if let direct = anyText(of: element) { return direct }
         guard depth < 3 else { return nil }
 
         if let parentRef = attribute(element, kAXParentAttribute),
@@ -523,11 +428,51 @@ final class EditWatcher {
         NSWorkspace.shared.frontmostApplication?.localizedName ?? "未知应用"
     }
 
+    /// **一次读取允许发起的 AX 调用总数。**
+    ///
+    /// 这是今天最严重的一个坑，必须写清楚：
+    ///
+    /// `value(of:)` 会递归找父级和子元素（深度 3、每层最多 8 个），最坏约
+    /// 2000 次跨进程 AX 调用。只给**单次**调用封顶是不够的 —— 每次就算 1ms，
+    /// 2000 次也是 2 秒；目标 App（Electron 系）响应慢时更长。
+    ///
+    /// 要命的是它跑在**主线程**上，而 Fn 事件监听的 run loop source 也挂在
+    /// 主线程上。主线程一卡，Fn 事件根本不处理 —— 用户看到的就是
+    /// 「在这个 App 里按 Fn 完全没反应」。
+    ///
+    /// 而这条慢路径**只在读不到 AXValue 的 App 里才会走到**（微信/原生控件
+    /// 第一次调用就返回了，Electron 系才会一路递归到底）—— 这正好解释了
+    /// 为什么偏偏是飞书、Edge 这类 App 出问题。
+    ///
+    /// 所以：宁可读不到（顶多是这次学不到词），也绝不能把主线程卡住。
+    /// 60 次足够覆盖正常的父级/子元素查找。
+    /// 一次读取的调用数上限。正常 App 每次调用是毫秒级，60 次 ≈ 几十毫秒。
+    private static let maxAXCallsPerRead = 60
+    /// 一次读取的**墙钟**上限。光靠计数挡不住最坏情况 ——
+    /// 如果每次都刚好卡到 0.5 秒超时，60 次就是 30 秒。
+    /// 目标不响应时必须有个时间上的硬闸。
+    private static let readBudgetSeconds: TimeInterval = 0.25
+    /// 本次读取已发起的调用数与开始时刻。只在主线程用，不需要加锁。
+    private static var axCallsThisRead = 0
+    private static var readStartedAt = Date()
+
+    /// 开始一次新的读取：重置预算。
+    static func beginRead() {
+        axCallsThisRead = 0
+        readStartedAt = Date()
+    }
+
+    /// 记一次调用并判断是否还有预算（次数与时间双闸）。
+    private static func spendAXCall() -> Bool {
+        guard Date().timeIntervalSince(readStartedAt) < readBudgetSeconds else { return false }
+        axCallsThisRead += 1
+        return axCallsThisRead <= maxAXCallsPerRead
+    }
+
     /// 跨进程 AX 调用的超时（秒）。
     ///
     /// 这些调用都是在主线程上做的，目标 App 卡住时会**把主线程一起拖死**。
     /// 实测后果：按 Fn 结束不了录音、飞书里语音输入失效。
-    /// 1 秒足够任何正常 App 响应，又不至于让人等。
     /// 0.5 秒：正常 App 的 AX 调用是毫秒级，这个值给足了余量；
     /// 卡住的 App 最多让我们等半秒，而不是拖死整条录音流程。
     private static let axTimeout: Float = 0.5
@@ -541,6 +486,7 @@ final class EditWatcher {
 
     /// 读一个 AX 属性。
     static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        guard spendAXCall() else { return nil }   // 超出本次预算就放弃，不拖主线程
         bounded(element)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }

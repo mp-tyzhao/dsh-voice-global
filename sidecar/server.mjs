@@ -446,16 +446,8 @@ async function handle({ wavPath, language = DEFAULT_LANGUAGE, cleanup = 'rules' 
             hits = [...hits, ...guarded.removed.map((term) => `fabricated:${term}`)];
           }
 
-          // 句中的停顿被识别成句号 —— LLM 判断不稳（要么不改、要么把正确的
-          // 句号也改掉），所以补一条确定性规则兜底。
-          const softened = process.env.VOICE_GLOBAL_NO_SOFTEN_PUNCT === '1'
-            ? { text, softened: 0 }
-            : softenMidSentencePeriods(text);
-          if (softened.softened > 0) {
-            log(`断句修正：${softened.softened} 处句中句号改为逗号`);
-            text = softened.text;
-            hits = [...hits, 'punctuation'];
-          }
+          // （断句软化统一放在下面那个公共出口做，这里不再重复一次 ——
+          //   两处都调过，实测幂等，纯粹是白算一遍 + 可能重复记日志。）
 
           // 最后再兜一次拼音层：模型可能把已经改对的词又写回去了
           if (vocabulary.terms.length) {
@@ -486,7 +478,9 @@ async function handle({ wavPath, language = DEFAULT_LANGUAGE, cleanup = 'rules' 
     if (softened.softened > 0) {
       log(`断句修正：${softened.softened} 处句中句号改为逗号`);
       text = softened.text;
-      hits = [...hits, 'punctuation'];
+      // 标签叫 soften 而不是 punctuation —— 后者在 cleanup.mjs 里已经用于
+      // "补标点"，同名的话事后分不清是哪一步改的。
+      hits = [...hits, 'soften'];
       if (rulesText) rulesText = softenMidSentencePeriods(rulesText).text;
     }
   }
@@ -585,7 +579,15 @@ if (argv.includes('--once')) {
     emit({ ok: false, error: '--once 需要 WAV 路径' });
     process.exit(1);
   }
-  const cleanup = argValue('--cleanup') ?? 'rules';
+  // VOICE_GLOBAL_FORCE_RULES=1 时强制走规则层。
+  //
+  // 为什么需要：`bench/accuracy.mjs --rules` 一直设这个环境变量，
+  // 但 sidecar 里**从来没有人读它** —— 于是那个 --rules 选项静默无效，
+  // 跑出来的是 LLM 路径的分数。拿它去判断"规则改动有没有让准确率变差"
+  // 会得到完全错误的结论。
+  const cleanup = process.env.VOICE_GLOBAL_FORCE_RULES === '1'
+    ? 'rules'
+    : (argValue('--cleanup') ?? 'rules');
   const language = argValue('--language') ?? DEFAULT_LANGUAGE;
   loadModels();
   handle({ wavPath, language, cleanup })

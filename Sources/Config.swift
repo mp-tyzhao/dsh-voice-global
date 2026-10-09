@@ -119,10 +119,16 @@ struct VoiceConfig: Codable {
     /// 去掉整段末尾的标点。听写多是"半句话"，自动补上的句号反而要手动删。
     /// 只剥末尾，中间的断句标点全部保留。注意 `？` 也在剥离范围内。
     var trimEndPunctuation = true
+    /// 把"句中停顿被识别成句号"的地方改成逗号。
+    ///
+    /// 这是**唯一会影响所有听写输出文本**的启发式规则，所以给一个开关：
+    /// 规则是 6~10 字就当成停顿，遇到"6~10 字的真句末"会误判成逗号。
+    /// 全量回归（136 条真实录音）显示净效果是好的，但用户该有办法关掉。
+    var softenMidSentencePeriods = true
 
     /// 从用户的手工修改中学习术语 —— "越用越聪明"的来源。
     ///
-    /// 开启后：粘贴完在**短窗口内**观测焦点输入框（默认 25 秒），
+    /// 开启后：粘贴完在**短窗口内**观测焦点输入框（默认 60 秒，见 EditWatcher.watchSeconds），
     /// 检测到改动就把前后差异交给学习模块、抽出术语进词表。
     /// 焦点一换就停，不做常驻监视；**内容只在本机用来抽词，不上传**。
     var learnFromEdits = true
@@ -226,7 +232,7 @@ struct VoiceConfig: Codable {
         case language, cleanup, tapMaxSeconds, nodePath, modelRoot, modelDir, launchAtLogin, threads
         case modelPath, tokensPath, vadPath
         case restoreClipboard, pasteDelayMs, restoreDelayMs, showHUD, playSounds, llm
-        case idleUnloadSeconds, trimEndPunctuation, learnFromEdits
+        case idleUnloadSeconds, trimEndPunctuation, softenMidSentencePeriods, learnFromEdits
         case devSidecarRoot, devAutoReload
         case keepRecordings, recordingsMaxCount, recordingsMaxMB, recordingsMaxDays
     }
@@ -251,6 +257,7 @@ struct VoiceConfig: Codable {
         playSounds = c.fallback(.playSounds, true)
         idleUnloadSeconds = c.fallback(.idleUnloadSeconds, 300)
         trimEndPunctuation = c.fallback(.trimEndPunctuation, true)
+        softenMidSentencePeriods = c.fallback(.softenMidSentencePeriods, true)
         learnFromEdits = c.fallback(.learnFromEdits, true)
         devSidecarRoot = c.fallback(.devSidecarRoot, "")
         devAutoReload = c.fallback(.devAutoReload, true)
@@ -281,6 +288,7 @@ struct VoiceConfig: Codable {
         try c.encode(playSounds, forKey: .playSounds)
         try c.encode(idleUnloadSeconds, forKey: .idleUnloadSeconds)
         try c.encode(trimEndPunctuation, forKey: .trimEndPunctuation)
+        try c.encode(softenMidSentencePeriods, forKey: .softenMidSentencePeriods)
         try c.encode(learnFromEdits, forKey: .learnFromEdits)
         try c.encode(devSidecarRoot, forKey: .devSidecarRoot)
         try c.encode(devAutoReload, forKey: .devAutoReload)

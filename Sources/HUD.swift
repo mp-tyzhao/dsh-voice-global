@@ -11,11 +11,25 @@ final class HUD {
     private var levelBar: LevelBar?
     private var hideWorkItem: DispatchWorkItem?
 
+    /// 是否正在录音。录音期间浮窗显示的是"正在聆听 + 电平条"，
+    /// 这条信息比任何提示都重要，不能被顶掉。
+    private var isRecording = false
+    /// 录音期间浮窗应该显示的标题/详情，用于自愈时恢复。
+    private var recordingTitle = "正在聆听…"
+    private var recordingDetail = ""
+    /// 录音期间被推迟的提示，等录音结束再补显示。
+    private var pendingFlash: (title: String, detail: String, seconds: Double)?
+
     private let width: CGFloat = 320
     private let height: CGFloat = 64
 
     func show(title: String, detail: String, recording: Bool) {
         let panel = ensurePanel()
+        isRecording = recording
+        if recording {
+            recordingTitle = title
+            recordingDetail = detail
+        }
         titleLabel?.stringValue = title
         detailLabel?.stringValue = detail
         levelBar?.isHidden = !recording
@@ -44,24 +58,55 @@ final class HUD {
         Log.shared.info("浮窗：\(title) → \(Int(panel.frame.origin.x)),\(Int(panel.frame.origin.y)) "
             + "屏 \(Int(screen?.frame.width ?? 0))x\(Int(screen?.frame.height ?? 0)) "
             + "可见=\(panel.isVisible) 屏数=\(NSScreen.screens.count)")
+
+        // 录音刚结束：把录音期间被推迟的提示补上。
+        // 延后 2.2 秒，让"已输入/没听清"这类结果提示先显示 ——
+        // 那才是用户此刻最关心的，学习提示排它后面。
+        if !recording, let pending = pendingFlash {
+            pendingFlash = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
+                guard let self, !self.isRecording else { return }
+                self.flash(title: pending.title, detail: pending.detail, seconds: pending.seconds)
+            }
+        }
     }
 
     func setLevel(_ level: Float) {
         levelBar?.level = level
-        // 录音期间顺带确认浮窗还在。
+        // 录音期间顺带做两件自愈：
         //
-        // 用户报过"浮窗没了，看不到是不是在输入"，重启才好 —— 但产品不能靠重启。
-        // 系统休眠唤醒、别的 App 抢占、或者我们自己某处误隐藏，都会让它消失，
-        // 而那时用户正在说话，恰恰最需要看到它。
+        // 1. **浮窗还在不在**。用户报过"浮窗没了，看不到是不是在输入"，
+        //    重启才好 —— 但产品不能靠重启。系统休眠唤醒、别的 App 抢占、
+        //    或者我们自己某处误隐藏都会让它消失，而那时用户正在说话。
+        // 2. **标题还是不是"正在聆听"**。提示（flash）会把标题改掉、把电平条
+        //    藏起来；一旦被顶掉，用户看到的就是一条过期的提示。
+        //    实测日志：17:35:42 开始录音 → :43 正在聆听 → :44 被"学不到"顶掉。
+        //
         // 这个函数在录音期间每秒被调用 30 次，拿它当自愈点几乎不花代价。
-        guard let panel, !panel.isVisible else { return }
+        guard let panel else { return }
+        if titleLabel?.stringValue != recordingTitle || detailLabel?.stringValue != recordingDetail
+            || levelBar?.isHidden == true {
+            titleLabel?.stringValue = recordingTitle
+            detailLabel?.stringValue = recordingDetail
+            levelBar?.isHidden = false
+            Log.shared.info("浮窗：录音状态被顶掉了，已恢复")
+        }
+        guard !panel.isVisible else { return }
         panel.alphaValue = 1
         panel.orderFrontRegardless()
         Log.shared.info("浮窗：被隐藏了，已重新显示")
     }
 
     /// 显示一个短暂的成功/失败提示后自动隐藏。
+    ///
+    /// **录音期间不覆盖**"正在聆听"浮窗 —— 那时电平条和录音状态比提示重要，
+    /// 而且提示一到期会把整个浮窗藏掉。改记下来，等录音结束再补显示。
     func flash(title: String, detail: String, seconds: Double = 1.6) {
+        if isRecording {
+            pendingFlash = (title, detail, seconds)
+            Log.shared.info("浮窗：（录音中）推迟提示：\(title)")
+            return
+        }
         show(title: title, detail: detail, recording: false)
         let work = DispatchWorkItem { [weak self] in self?.hide() }
         hideWorkItem = work

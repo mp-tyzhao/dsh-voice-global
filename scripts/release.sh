@@ -21,9 +21,16 @@ cd "$ROOT"
 
 MODE="${1:-release}"
 DRY_RUN=0
-WITH_SELFTEST=0
-[ "$MODE" = "--dry-run" ] && DRY_RUN=1
 ONLY_CHECK=0
+# 自测会**弹窗并抢焦点**（它需要真实的系统焦点才能测 AX 读取），
+# 用户明确说过影响他用电脑，所以默认不跑，要跑显式加 --with-selftest。
+# 注意：要在**所有**参数里找，不能只看 $1 —— 之前只判断 $1，
+# 于是 --with-selftest 从来没生效，端到端自测被永久跳过。
+WITH_SELFTEST=0
+for arg in "$@"; do
+  [ "$arg" = "--with-selftest" ] && WITH_SELFTEST=1
+done
+[ "$MODE" = "--dry-run" ] && DRY_RUN=1
 [ "$MODE" = "--check" ] && ONLY_CHECK=1
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }

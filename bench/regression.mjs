@@ -33,6 +33,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -49,6 +50,17 @@ const LIMIT = Number(value('--limit', '0')) || 0;
 
 const CORPUS_DIR = path.join(os.homedir(), '.voice-global', 'recordings');
 const INDEX = path.join(CORPUS_DIR, 'index.jsonl');
+const DICTIONARY = path.join(os.homedir(), '.voice-global', 'dictionary.json');
+
+/// 词表指纹。词表是学习功能的产物，会随用户使用而变 ——
+/// 它一变，同一条录音的输出就可能变，跟代码无关。
+function dictionaryHash() {
+  try {
+    return createHash('sha256').update(fs.readFileSync(DICTIONARY)).digest('hex').slice(0, 12);
+  } catch {
+    return 'none';
+  }
+}
 
 function loadEntries() {
   let entries = [];
@@ -80,8 +92,9 @@ const entries = loadEntries();
 const targets = LIMIT > 0 ? entries.slice(-LIMIT) : entries;
 
 if (!targets.length) {
-  console.log('语料里没有可跑的录音（需要 index.jsonl 里有 audio 字段）');
-  process.exit(0);
+  console.error('❌ 语料里没有可跑的录音 —— 这次什么都没测，不能算通过');
+  console.error('   （index.jsonl 里需要有 audio 字段；音频会按配置轮转清理）');
+  process.exit(1);
 }
 
 if (COMPARE) {
@@ -101,20 +114,30 @@ if (COMPARE) {
   const changed = [];
   let same = 0;
   let failed = 0;
+  let skipped = 0;
 
   for (const entry of targets) {
     const result = await runOne(path.join(CORPUS_DIR, entry.audio));
     if (!result?.ok) { failed += 1; continue; }
     const before = baseMap.get(entry.ts);
-    if (!before) continue;
+    if (!before) { skipped += 1; continue; }
     if (before.text === result.text) { same += 1; continue; }
     changed.push({ ts: entry.ts, before: before.text, after: result.text, raw: result.raw });
   }
 
   console.log(`  未变  ${same}`);
   console.log(`  变了  ${changed.length}`);
+  if (skipped) console.log(`  跳过  ${skipped}（不在基线里 —— 基线生成之后新录的）`);
   if (failed) console.log(`  失败  ${failed}`);
   console.log();
+
+  // 词表变了的话，差异可能来自词表而不是代码 —— 必须说清楚，
+  // 否则会诱导人"重新生成基线"把保证偷偷丢掉。
+  if (baseline.dictionaryHash && baseline.dictionaryHash !== dictionaryHash()) {
+    console.log('  ⚠️ 词表和生成基线时不一样了 —— 下面的差异可能来自词表，不是代码。');
+    console.log('     要判断代码改动，先临时把词表还原成基线时的版本。');
+    console.log();
+  }
 
   for (const item of changed) {
     console.log(`  ${item.ts}`);
@@ -124,6 +147,12 @@ if (COMPARE) {
     console.log();
   }
 
+  if (failed > 0) {
+    // 跑不起来 = 没测到。绝不能因为"没看到差异"就报通过。
+    console.error(`  ❌ ${failed}/${targets.length} 条跑失败 —— 这次回归不完整，不算通过。`);
+    console.error('     （常见原因：PATH 里没有 node，或模型路径不对）');
+    process.exit(1);
+  }
   if (changed.length === 0) {
     console.log('  没有任何输出变化 ✅');
   } else {
@@ -152,6 +181,7 @@ const payload = {
   savedAt: new Date().toISOString(),
   cleanup: CLEANUP,
   count: results.length,
+  dictionaryHash: dictionaryHash(),
   results,
 };
 

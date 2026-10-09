@@ -153,6 +153,9 @@ final class VoiceController {
     func stop() {
         levelTimer?.invalidate()
         idleTimer?.invalidate()
+        // 2 秒一次的检测定时器也要停 —— 否则"已经停掉的 App 还在弹提示"
+        secureInputTimer?.invalidate()
+        secureInputTimer = nil
         hotkey.stop()
         sidecar.stop()
     }
@@ -250,7 +253,10 @@ final class VoiceController {
         secureInputTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.checkSecureInput()
             self?.checkFnConflict()
+            // 顺带刷新 Fn 日志要用的前台 App 名 —— 事件回调里不能做这个查询
+            HotkeyTap.updateFrontmostApp(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?")
         }
+        HotkeyTap.updateFrontmostApp(NSWorkspace.shared.frontmostApplication?.localizedName ?? "?")
         checkFnConflict()
     }
 
@@ -278,7 +284,7 @@ final class VoiceController {
             Log.shared.info("Fn 键已归听写独占（系统「按下 Fn 键时」= 不执行任何操作）")
             return
         }
-        let what = ["不执行任何操作", "切换输入法", "显示表情与符号", "开始听写"][min(usage, 3)]
+        let what = ["不执行任何操作", "切换输入法", "显示表情与符号", "开始听写"][max(0, min(usage, 3))]
         Log.shared.error("Fn 被系统绑成了「\(what)」，会和听写抢这个键")
         // **必须提醒重启。** Apple 官方文档（macos-defaults 实测 Sonoma）写明
         // 这个设置"需要重启 Mac 才生效"。实测：改完立刻按 Fn 照旧切输入法，
@@ -286,7 +292,7 @@ final class VoiceController {
         hud.flash(
             title: "Fn 被系统占用了",
             detail: "「按下 Fn 键时」现在是「\(what)」，按 Fn 会同时触发它。"
-                + "改成「不执行任何操作」后**要重启电脑**才生效",
+                + "改成「不执行任何操作」后要重启电脑才生效",
             seconds: 8
         )
     }
@@ -595,6 +601,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         add(menu, title: "打开配置", action: #selector(openConfig))
         menu.addItem(buildModelMenu())
 
+        let softenItem = NSMenuItem(
+            title: ConfigStore.load().softenMidSentencePeriods ? "断句修正（句中句号→逗号）：开" : "断句修正（句中句号→逗号）：关",
+            action: #selector(toggleSoftenPunctuation), keyEquivalent: ""
+        )
+        softenItem.target = self
+        softenItem.state = ConfigStore.load().softenMidSentencePeriods ? .on : .off
+        menu.addItem(softenItem)
+
         let loginItem = NSMenuItem(
             title: LaunchAtLogin.isEnabled ? "开机自启：开" : "开机自启：关",
             action: #selector(toggleLaunchAtLogin), keyEquivalent: ""
@@ -668,7 +682,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dictItem.target = self
         learningMenu.addItem(dictItem)
 
-        let privacyHint = NSMenuItem(title: "粘贴后 25 秒内观测输入框；内容只在本机", action: nil, keyEquivalent: "")
+        let privacyHint = NSMenuItem(
+            title: "粘贴后 \(Int(EditWatcher.watchSeconds)) 秒内观测输入框；内容只在本机",
+            action: nil, keyEquivalent: ""
+        )
         privacyHint.isEnabled = false
         learningMenu.addItem(privacyHint)
 
@@ -738,14 +755,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 先声明辅助功能再读 —— 这一步是让 Chromium 系（Electron/Edge/飞书）
         // 构建输入框的关键。不声明的话它们一律报"读不到"。
         let app = EditWatcher.focusedAppName()
-        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
-        EditWatcher.announceAccessibility(to: pid)
 
-        // 声明之后给 Chromium 一点建树时间再读。
-        // 实测：声明完立刻读，只拿得到 role（AXTextArea），value 是空的 ——
-        // 树还没建完。这里转几圈等它。
-        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
-
+        // 这里原先有个 RunLoop.current.run(until:) 的"等 Chromium 建树"。
+        // 已经删掉，两个原因：
+        //   · 它等的事情不存在（那个"声明"已经回退了，没有任何声明发生）
+        //   · 在菜单动作里跑嵌套 run loop 会重入 —— 这 0.5 秒内 Fn 事件、
+        //     定时器、sidecar 回调都会在这个嵌套循环里执行，
+        //     用户此刻按 Fn 会在对话框还没弹出来之前就开始录音
         guard let element = EditWatcher.focusedElement() else {
             showAlert(
                 title: "拿不到焦点元素",
@@ -768,7 +784,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
                 \(tooLong
                     ? "超过 \(EditWatcher.maxWatchedCharacters) 字，为避免每 1.2 秒读一次全文，这个输入框不会被观测。"
-                    : "粘贴之后 25 秒内你在这里的修改，都会被学到。")
+                    : "粘贴之后 \(Int(EditWatcher.watchSeconds)) 秒内你在这里的修改，都会被学到。")
                 """
             )
         } else {
@@ -780,8 +796,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 当前应用：\(app)
                 控件类型：\(role)
 
-                已经向它声明过辅助功能（AXManualAccessibility），仍然读不到 ——
-                说明它不是 Chromium 系按需建树的问题，而是自绘控件（微信这类）。
+                （注意：我们没有、也不会去改别的 App 的辅助功能开关 ——
+                实测那样做会弄坏对方的输入。所以这里只报告事实，不推断原因。）
 
                 它没有把文本提供给辅助功能接口，自动学习在这里不生效
                 （部分 Electron 应用、终端、某些网页输入框都这样）。
@@ -1052,6 +1068,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.showAlert(title: "从历史修订中学到了 \(added.count + pending.count) 个词", body: body)
             Log.shared.info("回扫修订：生效 \(added.joined(separator: "、"))；待定 \(pending.joined(separator: "、"))")
         }
+    }
+
+    /// 断句规则开关：句中句号是否改逗号
+    @objc private func toggleSoftenPunctuation() {
+        var config = ConfigStore.load()
+        config.softenMidSentencePeriods.toggle()
+        ConfigStore.save(config)
+        reloadConfig()
+        controller?.notify(
+            title: config.softenMidSentencePeriods ? "断句修正：开" : "断句修正：关",
+            detail: config.softenMidSentencePeriods
+                ? "句中的短停顿会从句号改成逗号"
+                : "完全按识别模型给的标点输出"
+        )
     }
 
     /// 开机自启开关
