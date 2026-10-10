@@ -19,6 +19,21 @@ final class HUD {
     private var recordingDetail = ""
     /// 录音期间被推迟的提示，等录音结束再补显示。
     private var pendingFlash: (title: String, detail: String, seconds: Double)?
+    /// 最近一次收到电平的时刻。
+    private var lastLevelAt = Date.distantPast
+
+    /// **是不是真的还在录音。**
+    ///
+    /// 不光看 isRecording 这个标志，还要求"电平最近还在刷新"——
+    /// 电平每秒被推进 30 次，超过 2 秒没动静就说明录音早就结束了
+    /// （取消、录音过短、异常退出等路径）。
+    ///
+    /// 加这一层是因为：靠"每个结束路径都记得调 endRecording()"太脆 ——
+    /// 实测漏了两条（Esc 取消、录音过短），结果浮窗卡在"正在聆听"、
+    /// 用户以为 Esc 没反应。有了这个兜底，即使再漏一条也不会卡住。
+    private var isActivelyRecording: Bool {
+        isRecording && Date().timeIntervalSince(lastLevelAt) < 2.0
+    }
 
     private let width: CGFloat = 320
     private let height: CGFloat = 64
@@ -60,18 +75,37 @@ final class HUD {
             + "可见=\(panel.isVisible) 屏数=\(NSScreen.screens.count)")
 
         // 录音刚结束：把录音期间被推迟的提示补上。
-        // 延后 2.2 秒，让"已输入/没听清"这类结果提示先显示 ——
-        // 那才是用户此刻最关心的，学习提示排它后面。
-        if !recording, let pending = pendingFlash {
-            pendingFlash = nil
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
-                guard let self, !self.isRecording else { return }
-                self.flash(title: pending.title, detail: pending.detail, seconds: pending.seconds)
-            }
+        if !recording { flushPendingFlash() }
+    }
+
+    /// 结束录音状态，并补显示被推迟的提示。
+    ///
+    /// **取消、录音过短这类"没有后续浮窗"的路径必须调用它。**
+    ///
+    /// 不调用的话 `isRecording` 会一直是 true：flash 被无限推迟，浮窗停在
+    /// "正在聆听…"不动，用户按 Esc 之后界面毫无反应 —— 看起来就是"Esc 没用"。
+    /// 实测踩过两次（2026-10-09 13:32、2026-10-10 07:31，日志里都是
+    /// 「（录音中）推迟提示：已取消」然后再无下文）。
+    func endRecording() {
+        guard isRecording else { return }
+        isRecording = false
+        flushPendingFlash()
+    }
+
+    /// 把录音期间被推迟的提示补上。
+    /// 延后 2.2 秒，让"已输入/没听清"这类结果提示先显示 ——
+    /// 那才是用户此刻最关心的，学习提示排它后面。
+    private func flushPendingFlash() {
+        guard let pending = pendingFlash else { return }
+        pendingFlash = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
+            guard let self, !self.isRecording else { return }
+            self.flash(title: pending.title, detail: pending.detail, seconds: pending.seconds)
         }
     }
 
     func setLevel(_ level: Float) {
+        lastLevelAt = Date()
         levelBar?.level = level
         // 录音期间顺带做两件自愈：
         //
@@ -102,11 +136,13 @@ final class HUD {
     /// **录音期间不覆盖**"正在聆听"浮窗 —— 那时电平条和录音状态比提示重要，
     /// 而且提示一到期会把整个浮窗藏掉。改记下来，等录音结束再补显示。
     func flash(title: String, detail: String, seconds: Double = 1.6) {
-        if isRecording {
+        guard !isActivelyRecording else {
             pendingFlash = (title, detail, seconds)
             Log.shared.info("浮窗：（录音中）推迟提示：\(title)")
             return
         }
+        // 录音状态其实已经结束、只是标志没清 —— 顺手清掉，别把提示憋住
+        if isRecording { isRecording = false }
         show(title: title, detail: detail, recording: false)
         let work = DispatchWorkItem { [weak self] in self?.hide() }
         hideWorkItem = work

@@ -200,6 +200,9 @@ final class VoiceController {
         levelTimer?.invalidate()
         state = .idle
         scheduleIdleUnload()
+        // 先结束录音状态再提示 —— 否则 flash 会被"录音期间不覆盖浮窗"的逻辑
+        // 一直推迟，用户按 Esc 后界面毫无反应（实测踩过的 bug）
+        hud.endRecording()
         hud.flash(title: "已取消", detail: "本次录音已丢弃", seconds: 1.0)
     }
 
@@ -339,6 +342,7 @@ final class VoiceController {
         } catch {
             lastError = "\(error)"
             Log.shared.error("录音启动失败：\(error)")
+            hud.endRecording()
             hud.flash(title: "无法录音", detail: "\(error)", seconds: 3)
             return
         }
@@ -359,6 +363,8 @@ final class VoiceController {
         levelTimer?.invalidate()
         guard let wav = recorder.stop() else {
             state = .idle
+            // 同上：这条路径没有后续的"转写中"浮窗来清掉录音状态
+            hud.endRecording()
             hud.flash(title: "太短了", detail: "没有录到有效语音", seconds: 1.4)
             return
         }
