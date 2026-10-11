@@ -204,6 +204,10 @@ export function extractTerms(raw, corrected) {
       let confidence = 0;
       // 上下文扩展前的原样 —— 扩展会带上没变过的字，拿它比对会让相似度失真
       const runText = text;
+      // 上下文往两边各扩了几个字。**原文侧要扩同样多** ——
+      // 否则词只是对子的一半，另一半（误听成什么样）就丢了。
+      let beforeCount = 0;
+      let afterCount = 0;
       if (run.kind === 'cjk') {
         const originalLength = text.length;
         // **这次改动像"识别错误"吗？** 不像就当成用户改主意，不学 ——
@@ -221,6 +225,7 @@ export function extractTerms(raw, corrected) {
             before.unshift(token);
           }
           text = before.join('') + text;
+          beforeCount = before.length;
         }
         // 往后带：仅当替换跨度不止一个字时才允许。
         //
@@ -236,8 +241,14 @@ export function extractTerms(raw, corrected) {
             after.push(token);
           }
           text += after.join('');
+          afterCount = after.length;
         }
-        if (text.length > MAX_CJK_TERM) text = text.slice(-MAX_CJK_TERM);
+        // 截断时原文侧要跟着往后挪，否则两边错位
+        let dropped = 0;
+        if (text.length > MAX_CJK_TERM) {
+          dropped = text.length - MAX_CJK_TERM;
+          text = text.slice(-MAX_CJK_TERM);
+        }
         // 只替换了一个字、而且带上文后尾字仍是虚词 → `那样把`、`识别得`、`比如给`，丢掉
         if (originalLength === 1 && isFunctionChar(text[text.length - 1])) { run = null; return; }
         // 首字是虚词的片段不是术语（`把一些`、`在这个` 这种碎片）
@@ -245,7 +256,11 @@ export function extractTerms(raw, corrected) {
         if (text.length >= MIN_CJK_RUN) {
           // 整段是新词（插入型）比"单字替换 + 猜上文"可靠得多
           confidence = originalLength >= MIN_CJK_RUN ? CONFIDENCE_CJK_DIRECT : CONFIDENCE_CJK_GUESSED;
-          candidates.push({ term: text, confidence, kind: originalLength >= MIN_CJK_RUN ? 'cjk' : 'cjk-guessed' });
+          // 原文侧：从同样的起点取同样多 —— 两边对齐才能当"对子"用
+          const fromStart = group.rawStart - beforeCount + dropped;
+          const fromEnd = group.rawEnd + afterCount;
+          const from = rawTokens.slice(fromStart, fromEnd + 1).join('');
+          candidates.push({ term: text, from, confidence, kind: originalLength >= MIN_CJK_RUN ? 'cjk' : 'cjk-guessed' });
         }
       } else if (text.length >= MIN_LATIN_LEN) {
         // 西文词边界天然清楚，拼错也很可能整词被听错，置信度最高；
@@ -253,6 +268,7 @@ export function extractTerms(raw, corrected) {
         const short = text.length < LATIN_SHORT_LENGTH;
         candidates.push({
           term: text,
+          from: group.rawText,
           confidence: short ? CONFIDENCE_LATIN_SHORT : CONFIDENCE_LATIN,
           kind: short ? 'latin-short' : 'latin',
         });
@@ -512,12 +528,15 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
 
   const pendingPath = value('--pending')
     || path.join(os.homedir(), '.voice-global', 'learning-pending.json');
+  // 纠正对子（原文的误听 → 用户改成的东西）。见 dictionary.mjs 的 applyReplacements。
+  const replacementsPath = value('--replacements')
+    || path.join(os.homedir(), '.voice-global', 'replacements.json');
   const candidates = extractTerms(raw, corrected);
   if (argv.includes('--dry')) {
     process.stdout.write(`${JSON.stringify({ added: [], pending: [], candidates })}\n`);
   } else {
-    const { added, pending, promoted, rejected } = learn(dictPath, pendingPath, candidates, loadAccepted());
-    process.stdout.write(`${JSON.stringify({ added, pending, promoted, rejected, candidates })}\n`);
+    const { added, pending, promoted, rejected, pairs: pairsOut } = learn(dictPath, pendingPath, candidates, loadAccepted(), { replacementsPath });
+    process.stdout.write(`${JSON.stringify({ added, pending, promoted, rejected, candidates, pairs: pairsOut })}\n`);
   }
 }
 
@@ -532,7 +551,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
  * @param {{term: string, confidence: number, kind: string}[]} candidates
  * @returns {{added: string[], pending: string[], promoted: string[]}}
  */
-export function learn(dictionaryPath, pendingPath, candidates, acceptedTexts = []) {
+export function learn(dictionaryPath, pendingPath, candidates, acceptedTexts = [], options = {}) {
   let pending = {};
   try {
     pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8'));
@@ -582,7 +601,40 @@ export function learn(dictionaryPath, pendingPath, candidates, acceptedTexts = [
     fs.writeFileSync(pendingPath, `${JSON.stringify(pending, null, 2)}\n`);
   } catch { /* 写不了就算了，不影响主流程 */ }
 
-  return { added, pending: stillPending, promoted, rejected };
+  // **把对子记下来。**
+  //
+  // 每次修订我们手里都有两边：原文怎么听错的、用户改成了什么。
+  // 原来只用右边（词），左边扔掉 —— 那正是 superwhisper 让用户手工枚举的东西。
+  // 对子层是精确匹配，所以这里不做置信度门槛（低置信度的"词"不该自动生效，
+  // 但"这个词确实被这么听过"是个事实，不是猜测）。
+  const recordedPairs = [];
+  if (options.replacementsPath) {
+    try {
+      let document = {};
+      try { document = JSON.parse(fs.readFileSync(options.replacementsPath, 'utf8')); } catch { /* 首次 */ }
+      const pairs = (document && typeof document.pairs === 'object' && document.pairs) || {};
+      for (const candidate of candidates) {
+        const from = String(candidate.from ?? '').trim();
+        const to = String(candidate.term ?? '').trim();
+        if (!from || !to || from === to) continue;
+        const existing = pairs[from];
+        pairs[from] = { to, count: (existing?.count ?? 0) + 1, at: new Date().toISOString() };
+        recordedPairs.push({ from, to });
+      }
+      if (recordedPairs.length) {
+        // 对子数不设上限会无限增长；超出后按最近使用保留。
+        const entries = Object.entries(pairs);
+        const MAX_PAIRS = 500;
+        const trimmed = entries.length > MAX_PAIRS
+          ? Object.fromEntries(entries.sort((a, b) => String(b[1]?.at).localeCompare(String(a[1]?.at))).slice(0, MAX_PAIRS))
+          : pairs;
+        fs.writeFileSync(options.replacementsPath, JSON.stringify({ pairs: trimmed }, null, 2));
+      }
+    } catch { /* 对子写失败不影响学词 */ }
+  }
+
+
+  return { added, pending: stillPending, promoted, rejected, pairs: recordedPairs };
 }
 
 /**
@@ -647,6 +699,7 @@ export function mineCorpus(options) {
     pendingPath,
     minedPath,
     corpusPath = path.join(os.homedir(), '.voice-global', 'recordings', 'index.jsonl'),
+    replacementsPath = path.join(os.homedir(), '.voice-global', 'replacements.json'),
   } = options;
 
   let mined = {};
@@ -681,7 +734,7 @@ export function mineCorpus(options) {
 
     const candidates = extractTerms(raw, corrected);
     if (candidates.length) {
-      const result = learn(dictionaryPath, pendingPath, candidates, accepted);
+      const result = learn(dictionaryPath, pendingPath, candidates, accepted, { replacementsPath });
       added.push(...result.added);
       rejected.push(...result.rejected);
       // 注意：不进 pending 累积数组 —— 后面的条目可能把前面进的提升掉，

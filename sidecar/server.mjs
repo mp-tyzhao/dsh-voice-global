@@ -31,7 +31,7 @@ import { existsSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { clean, trimEndPunctuation, softenMidSentencePeriods } from './cleanup.mjs';
 import { polish, isPlausible } from './llm.mjs';
-import { loadTerms, renderVocabularyPrompt, stripFabricatedTerms, revertUnanchoredTerms } from './dictionary.mjs';
+import { loadTerms, renderVocabularyPrompt, stripFabricatedTerms, revertUnanchoredTerms, loadReplacements, applyReplacements } from './dictionary.mjs';
 import { applyTerms, selectRelevantTerms } from './phonetic.mjs';
 import { loadProfile, buildModelConfig, decodingMethod, supportsHotwords, discoverProfiles } from './profiles.mjs';
 
@@ -75,6 +75,9 @@ const DEFAULT_LANGUAGE = PROFILE.senseVoice?.language ?? PROFILE.whisper?.langua
 const DICTIONARY_PATH = process.env.VOICE_GLOBAL_DICTIONARY
   || join(homedir(), '.voice-global', 'dictionary.json');
 let termsCache = { mtimeMs: -1, terms: [], prompt: '' };
+const REPLACEMENTS_PATH = process.env.VOICE_GLOBAL_REPLACEMENTS
+  || join(homedir(), '.voice-global', 'replacements.json');
+let pairsCache = { mtimeMs: -1, pairs: [] };
 
 /** 词表小的时候全量注入，大了才按句检索。 */
 const FULL_INJECT_LIMIT = Number(process.env.VOICE_GLOBAL_FULL_INJECT ?? 50);
@@ -117,7 +120,32 @@ function currentVocabulary() {
     if (termsCache.mtimeMs !== -1) termsCache = { mtimeMs: -1, terms: [], prompt: '' };
   }
   return termsCache;
-}
+  }
+
+  /**
+   * 纠正对子（原文的误听 → 用户改成的东西）。
+   *
+   * **这一层排在拼音层之前**，理由：
+   *   · 它比拼音层**更可信** —— 拼音层是"读音像"，它是"原文确实这么错过"
+   *   · 它是**精确匹配**，只在真的发生过的误听上触发，
+   *     不会像词表那样被硬套（用户实测报过：奇绩算力 被改成 奇绩创坛）
+   *   · 先把已知的误听修掉，后面的拼音层和 LLM 就在更干净的基础上工作
+   *
+   * 和词表一样按 mtime 缓存 —— 学到一个新对子不需要重启。
+   */
+  function currentReplacements() {
+    try {
+      const stat = statSync(REPLACEMENTS_PATH);
+      if (stat.mtimeMs !== pairsCache.mtimeMs) {
+        const pairs = loadReplacements(REPLACEMENTS_PATH);
+        pairsCache = { mtimeMs: stat.mtimeMs, pairs };
+        if (pairs.length) log(`纠正对子已加载：${pairs.length} 条`);
+      }
+    } catch {
+      if (pairsCache.mtimeMs !== -1) pairsCache = { mtimeMs: -1, pairs: [] };
+    }
+    return pairsCache;
+  }
 
 const LLM = {
   baseURL: process.env.VOICE_GLOBAL_LLM_BASE || '',
@@ -385,14 +413,30 @@ async function handle({ wavPath, language = DEFAULT_LANGUAGE, cleanup = 'rules' 
     // 拼音层最先跑：本地、确定性、零成本，把同音字改对（`奇迹创谈`→`奇绩创坛`）。
     // 不放在 LLM 分支里 —— 它是本地纠正，rules 模式同样该生效；也不该因为
     // 没配 LLM 就失效。
+    // **纠正对子最先跑**：精确匹配已知的误听。
+    // 排在拼音层之前 —— 可信度更高（原文确实这么错过），而且精确匹配不会误伤。
     let base = raw;
     let phoneticHits = [];
+    const known = currentReplacements();
+    if (known.pairs.length) {
+      const replaced = applyReplacements(base, known.pairs);
+      if (replaced.applied.length) {
+        log(`对子纠正：${replaced.applied.map((a) => `${a.from}→${a.to}`).join('、')}`);
+        base = replaced.text;
+        phoneticHits = replaced.applied.map((a) => `pair:${a.to}`);
+      }
+    }
     if (vocabulary.terms.length) {
-      const fixed = applyTerms(raw, vocabulary.terms);
+      // **对 base 做，不是对 raw。**
+      // 踩过的坑（2026-10-11）：这里原来写的是 applyTerms(raw, ...) 然后
+      // base = fixed.text —— 那样会把**对子层刚做完的修正整个覆盖掉**
+      // （对子层改的是 base，拼音层从 raw 重来一遍就丢了）。
+      // hits 也要累加，不能覆盖 —— 否则日志上看不出对子层干了什么。
+      const fixed = applyTerms(base, vocabulary.terms);
       if (fixed.applied.length) {
         log(`拼音层纠正：${fixed.applied.map((a) => `${a.from}→${a.to}`).join('、')}`);
         base = fixed.text;
-        phoneticHits = fixed.applied.map((a) => `phonetic:${a.to}`);
+        phoneticHits = [...phoneticHits, ...fixed.applied.map((a) => `phonetic:${a.to}`)];
       }
     }
 

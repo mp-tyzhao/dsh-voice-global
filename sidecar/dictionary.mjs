@@ -286,3 +286,64 @@ export function loadTerms(path) {
     return [];
   }
 }
+
+/**
+ * 纠正对子：**原文里那个误听** → **用户改成的东西**。
+ *
+ * ## 为什么要有这一层（2026-10-11，调研市面产品之后的结论）
+ *
+ * 我们原来只存"正确的词"。superwhisper 的官方文档给的做法更精确：
+ *
+ *   > 如果一个词被反复听错成好几种样子，就为每一种变形各加一条替换，
+ *   > 都指向正确结果。
+ *
+ * 它是让用户**手工枚举变形**的。而每次观测修订时，两边都在我们手里 ——
+ * 变形是白捡的。VoiceInk 的 Dictionary Auto Learn 也是这个结构：
+ * Vocabulary（词）和 Word Replacement（对子）是两个独立的东西。
+ *
+ * ## 对子层为什么能解决"过度套用"
+ *
+ * 它只在**原文精确出现那个误听**时才触发。
+ * `最佳时间部署 → 最佳实践部署` 不会去动「最佳算力部署」，
+ * 而"词表 + LLM"那条路会（用户实测报过：奇绩算力 被改成 奇绩创坛）。
+ *
+ * 精确匹配是这一层的全部价值 —— 所以应用时**不做任何相似度判断**。
+ *
+ * @param {string} path
+ * @returns {Array<{from: string, to: string}>}
+ */
+export function loadReplacements(path) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path, 'utf8'));
+    const pairs = Array.isArray(parsed) ? parsed : parsed?.pairs;
+    if (!pairs || typeof pairs !== 'object') return [];
+    return Object.entries(pairs)
+      .map(([from, meta]) => ({ from: String(from), to: String(meta?.to ?? '') }))
+      .filter((pair) => pair.from && pair.to && pair.from !== pair.to);
+  } catch { return []; }
+}
+
+/**
+ * 应用纠正对子。**精确匹配**，长对优先（避免短对子先吃掉长对子的一部分）。
+ *
+ * 不做相似度判断是有意的：这一层的可信度来自"原文确实这么错过"，
+ * 而不是来自"读起来像"。加判断反而会把它的确定性优势抹掉。
+ *
+ * @param {string} text
+ * @param {Array<{from: string, to: string}>} pairs
+ * @returns {{text: string, applied: Array<{from: string, to: string}>}}
+ */
+export function applyReplacements(text, pairs) {
+  if (!text || !pairs?.length) return { text, applied: [] };
+  let out = String(text);
+  const applied = [];
+  const sorted = [...pairs].sort(
+    (a, b) => Array.from(b.from).length - Array.from(a.from).length,
+  );
+  for (const pair of sorted) {
+    if (!out.includes(pair.from)) continue;
+    out = out.split(pair.from).join(pair.to);
+    applied.push({ from: pair.from, to: pair.to });
+  }
+  return { text: out, applied };
+}

@@ -7,7 +7,7 @@
  */
 
 import {
-  tokenize, alignmentGaps, stripFabricatedTerms, renderVocabularyPrompt, loadTerms,
+  tokenize, alignmentGaps, stripFabricatedTerms, renderVocabularyPrompt, loadTerms, applyReplacements,
 } from './dictionary.mjs';
 
 let failures = 0;
@@ -111,6 +111,47 @@ console.log('\n— 读文件容错 —');
 }
 
 console.log();
+
+// ── 纠正对子：精确匹配才有价值 ──────────────────────────────────
+// 这一层存在的唯一理由是**精确**：只在原文真的这么错过时才触发。
+// 一旦加了相似度判断，它就和"词表 + LLM"变成同一个东西，
+// 而那条路会过度套用（用户实测报过：奇绩算力 被改成 奇绩创坛）。
+console.log('\n— 纠正对子 —');
+{
+  const ok = (label, got, want) => {
+    const pass = got === want;
+    if (!pass) failures += 1;
+    console.log(`${pass ? 'PASS' : 'FAIL'}  ${label}${pass ? '' : `\n      得到 ${JSON.stringify(got)}\n      期望 ${JSON.stringify(want)}`}`);
+  };
+
+  const pairs = [
+    { from: '最佳时间部署', to: '最佳实践部署' },
+    { from: '包括攀登', to: '包括判灯' },
+  ];
+  ok(
+    '精确命中就替换',
+    applyReplacements('按照最佳时间部署服务', pairs).text,
+    '按照最佳实践部署服务',
+  );
+  // **最重要的一条**：不得误伤读音相近但不是同一个误听的词
+  ok(
+    '不误伤「最佳算力部署」',
+    applyReplacements('另外最佳算力部署也要看，还有最佳时间部署这条', pairs).text,
+    '另外最佳算力部署也要看，还有最佳实践部署这条',
+  );
+  ok('没命中就不动', applyReplacements('今天天气不错', pairs).text, '今天天气不错');
+  ok('空文本不崩', applyReplacements('', pairs).text, '');
+  ok('空对子不崩', applyReplacements('随便什么', []).text, '随便什么');
+
+  // 长对优先：短对子不能先吃掉长对子的一部分
+  const nested = [
+    { from: '攀登', to: '判灯' },
+    { from: '包括攀登', to: '包括判灯' },
+  ];
+  ok('长对优先', applyReplacements('包括攀登都给修正好', nested).text, '包括判灯都给修正好');
+}
+
+
 if (failures === 0) {
   console.log('ALL PASS');
   process.exit(0);
