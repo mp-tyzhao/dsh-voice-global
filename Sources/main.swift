@@ -817,14 +817,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 调研里反复出现的一条：用户要能一眼看出哪些是系统自作主张加的。
     /// Typeless 用「Auto-added / Manually-added」两个桶，VoiceInk 用四种审查动作 ——
     /// 共同点是**必须能看懂、能撤销**，否则用户不敢让它继续学。
+    /// 审查学到的词：删掉哪行就撤销哪个词；待确认的保留下来就转正。
+    ///
+    /// Typeless 用「Auto-added / Manually-added」两个桶，VoiceInk 用四种审查动作 ——
+    /// 共同点是**必须能看懂、能撤销**，否则用户不敢让它继续学。
+    ///
+    /// 2026-10-11 起也列**待定区**的词：它们只见过一次，系统还没敢自动生效，
+    /// 而提升阈值是"见过 2 次"——真实使用里同一个词很少被连改两次，
+    /// 于是它们永远出不来（实测 5 条全部停在"见过 1 次"）。
+    /// 现在把选择权交回用户：留着就转正，删掉就丢掉。
     @objc private func reviewLearned() {
         guard let controller else { return }
         controller.listTerms { [weak self] entries in
             guard let self else { return }
             let learned = entries.filter { ($0["addedBy"] as? String) == "learned" }
-            guard !learned.isEmpty else {
+            let pending = entries.filter { ($0["addedBy"] as? String) == "pending" }
+            guard !learned.isEmpty || !pending.isEmpty else {
                 self.showAlert(
-                    title: "还没有自动学到的词",
+                    title: "还没有学到的词",
                     body: """
                     你在输入框里改掉识别错的字之后，改动会被学到，然后出现在这里。
 
@@ -834,15 +844,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
+            let learnedTerms = learned.compactMap { $0["term"] as? String }
+            let pendingTerms = pending.compactMap { $0["term"] as? String }
+
             let alert = NSAlert()
-            alert.messageText = "审查学到的词（\(learned.count) 个）"
-            alert.informativeText = "这些是从你的手工修改里学来的。删掉哪一行，就撤销哪个词。"
+            alert.messageText = "审查学到的词（\(learnedTerms.count) 个已生效，\(pendingTerms.count) 个待确认）"
+            alert.informativeText = """
+            这些都是从你的手工修改里学来的。删掉哪一行，就撤销哪个词。
+
+            后半部分标着「待确认」的，是只见过一次、系统还没敢自动用上的。
+            留着它们，下次听写就会正式生效。
+            """
             alert.addButton(withTitle: "保存")
             alert.addButton(withTitle: "取消")
 
-            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 200))
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 220))
             let editor = NSTextView(frame: scroll.bounds)
-            editor.string = learned.map { $0["term"] as? String ?? "" }.joined(separator: "\n")
+            // 已生效的在前，待确认的在后，中间空一行分隔。
+            // 解析时会过滤空行，所以这一行只是给人看的。
+            let body = learnedTerms + (pendingTerms.isEmpty ? [] : [""] + pendingTerms)
+            editor.string = body.joined(separator: "\n")
             editor.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
             editor.isRichText = false
             scroll.documentView = editor
@@ -858,12 +879,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     .map { $0.trimmingCharacters(in: .whitespaces) }
                     .filter { !$0.isEmpty }
             )
-            let removed = learned.compactMap { $0["term"] as? String }.filter { !kept.contains($0) }
-            guard !removed.isEmpty else { return }
+            let removed = learnedTerms.filter { !kept.contains($0) }
+            let promoted = pendingTerms.filter { kept.contains($0) }
 
-            controller.removeTerms(removed) { gone in
-                self.showAlert(title: "已撤销 \(gone.count) 个词", body: gone.joined(separator: "、"))
-                Log.shared.info("撤销学到的词：\(gone.joined(separator: "、"))")
+            if !removed.isEmpty {
+                controller.removeTerms(removed) { gone in
+                    Log.shared.info("撤销学到的词：\(gone.joined(separator: "、"))")
+                }
+            }
+            if !promoted.isEmpty {
+                controller.mergeTerms(promoted) { added in
+                    Log.shared.info("确认转正的词：\(added.joined(separator: "、"))")
+                }
+            }
+            if removed.isEmpty && promoted.isEmpty {
+                self.showAlert(title: "没有变化", body: "词表保持不变。")
+            } else {
+                var parts: [String] = []
+                if !promoted.isEmpty { parts.append("转正 \(promoted.count) 个：\(promoted.joined(separator: "、"))") }
+                if !removed.isEmpty { parts.append("撤销 \(removed.count) 个：\(removed.joined(separator: "、"))") }
+                self.showAlert(title: "已更新词表", body: parts.joined(separator: "\n"))
             }
         }
     }

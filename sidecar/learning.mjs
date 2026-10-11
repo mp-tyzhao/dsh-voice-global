@@ -409,6 +409,24 @@ export function describeTerms(dictionaryPath) {
   }));
 }
 
+/**
+ * 待定区的词（只见过一次、还没敢自动生效的）。
+ * 标 addedBy: 'pending' 让它和正式词表一起返回，宿主菜单里显示成"待确认"。
+ */
+export function describePending(pendingPath) {
+  let document = {};
+  try { document = JSON.parse(fs.readFileSync(pendingPath, 'utf8')); } catch { return []; }
+  if (!document || typeof document !== 'object') return [];
+  return Object.entries(document).map(([term, meta]) => ({
+    term: String(term),
+    addedBy: 'pending',
+    at: meta?.lastSeen,
+    confidence: meta?.confidence,
+    seen: meta?.count ?? 0,
+  }));
+}
+
+
 /** 从词表里删词（撤销学到的词）。 */
 export function removeTerms(dictionaryPath, terms) {
   let document = { terms: [] };
@@ -464,7 +482,18 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   // 词表管理：宿主用来做「审查 / 撤销」
   if (argv.includes('--list')) {
     const dictForList = value('--dict') || path.join(os.homedir(), '.voice-global', 'dictionary.json');
-    process.stdout.write(`${JSON.stringify({ terms: describeTerms(dictForList) })}\n`);
+    const pendingForList = value('--pending')
+      || path.join(os.homedir(), '.voice-global', 'learning-pending.json');
+    // **待定区也要一起返回。**
+    //
+    // 踩过的坑（2026-10-11）：待定区的提升阈值是"见过 2 次"，
+    // 而真实使用里同一个词很少被连改两次 —— 实测 5 条**全部**停在
+    // "见过 1 次"，永远等不到提升；而菜单只读正式词表，用户根本看不见它们。
+    // 于是待定区成了黑洞：进去就出不来。
+    // 现在一起返回（标 addedBy: pending），菜单里可以一键确认。
+    process.stdout.write(`${JSON.stringify({
+      terms: [...describeTerms(dictForList), ...describePending(pendingForList)],
+    })}\n`);
     process.exit(0);
   }
   if (argv.includes('--merge')) {
