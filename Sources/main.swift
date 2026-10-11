@@ -762,56 +762,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 构建输入框的关键。不声明的话它们一律报"读不到"。
         let app = EditWatcher.focusedAppName()
 
-        // 这里原先有个 RunLoop.current.run(until:) 的"等 Chromium 建树"。
-        // 已经删掉，两个原因：
-        //   · 它等的事情不存在（那个"声明"已经回退了，没有任何声明发生）
-        //   · 在菜单动作里跑嵌套 run loop 会重入 —— 这 0.5 秒内 Fn 事件、
-        //     定时器、sidecar 回调都会在这个嵌套循环里执行，
-        //     用户此刻按 Fn 会在对话框还没弹出来之前就开始录音
-        guard let element = EditWatcher.focusedElement() else {
-            showAlert(
-                title: "拿不到焦点元素",
-                body: "当前应用：\(app)\n\n把光标放进输入框，再点一次这个菜单。"
-            )
-            return
-        }
-        var roleRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
-        let role = roleRef as? String ?? "?"
-
-        if let text = EditWatcher.value(of: element) {
+        // 走真正的读取链（四级降级），而不是只看第一级 ——
+        // 这样报出来的结果和实际学习时的行为一致。
+        if let read = EditWatcher.readFocusedText() {
+            let text = read.text
+            let strategy = EditWatcher.strategyByApp[app] ?? "系统焦点"
             let tooLong = text.count > EditWatcher.maxWatchedCharacters
             showAlert(
                 title: tooLong ? "能读到，但内容过长" : "这个 App 可以自动学习",
                 body: """
                 当前应用：\(app)
-                控件类型：\(role)
+                读到方式：\(strategy)
                 当前内容：\(text.count) 字
 
                 \(tooLong
-                    ? "超过 \(EditWatcher.maxWatchedCharacters) 字，为避免每 1.2 秒读一次全文，这个输入框不会被观测。"
-                    : "粘贴之后 \(Int(EditWatcher.watchSeconds)) 秒内你在这里的修改，都会被学到。")
+                    ? "超过 \(EditWatcher.maxWatchedCharacters) 字就不观测了 —— 每 1.2 秒读一次全文不划算。"
+                    : "粘贴之后 60 秒内你在这里的修改都会被学习。")
                 """
             )
-        } else {
+            Log.shared.info("学习诊断：「\(app)」读到 \(text.count) 字，方式=\(strategy)")
+            return
+        }
+
+        // 三级都失败：把这一级的实际样子记下来，便于判断对方
+        // 是「根本没暴露」还是「暴露在别的属性上」
+        if let element = EditWatcher.focusedElement() {
+            let role = EditWatcher.stringAttribute(element, kAXRoleAttribute) ?? "?"
+            let subrole = EditWatcher.stringAttribute(element, kAXSubroleAttribute) ?? "?"
             let names = EditWatcher.attributeNames(of: element)
-            Log.shared.info("学习诊断：「\(app)」控件 \(role)，可用属性 \(names.joined(separator: ", "))")
+            Log.shared.info("学习诊断：「\(app)」三级都没读到。角色=\(role) 子角色=\(subrole) 可用属性=\(names.joined(separator: ", "))")
             showAlert(
-                title: "这个 App 不暴露输入框内容",
+                title: "这个 App 读不到输入框内容",
                 body: """
                 当前应用：\(app)
-                控件类型：\(role)
+                控件类型：\(role) / \(subrole)
 
-                （注意：我们没有、也不会去改别的 App 的辅助功能开关 ——
-                实测那样做会弄坏对方的输入。所以这里只报告事实，不推断原因。）
+                三级都试过了（系统焦点 → App 焦点 → App 树内查找）。
+                详细属性名已写进日志（菜单 →「打开日志」可看）。
 
-                它没有把文本提供给辅助功能接口，自动学习在这里不生效
-                （部分 Electron 应用、终端、某些网页输入框都这样）。
-
-                改用菜单里的「纠正最近一次…」，手改一次同样能学到词。
+                这种通常是**自绘文本**的控件（终端、部分编辑器、canvas 网页），
+                系统层面就没有文本可读。改用菜单「学习 → 从最近记录里挑一条纠正…」，
+                手改一次同样能学到词。
                 """
             )
+            return
         }
+
+        showAlert(title: "拿不到焦点元素", body: "当前应用：\(app)\n\n把光标放进输入框，再点一次这个菜单。")
     }
 
     /// 审查学到的词：只列系统自动学到的，删掉哪行就撤销哪个词。

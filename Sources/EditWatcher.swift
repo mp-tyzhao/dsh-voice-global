@@ -310,95 +310,193 @@ final class EditWatcher {
     // MARK: - 工具
 
     // MARK: - 辅助功能
+    //
+    // ## 为什么这里是一串"逐级降级"而不是一个 API 调用
+    //
+    // **macOS 没有「把用户正在用的那个输入框内容给我」这种 API。**
+    // 只有 Accessibility 这一层，而每个 App 怎么暴露文本各不相同：
+    //   · 标准 Cocoa 控件          → kAXValueAttribute 直接读得到
+    //   · 网页输入框（Chromium 系） → 常常只认按区间取字符串
+    //   · Electron / Chromium      → 只有"知道有辅助技术在场"才建完整的树
+    //   · 自绘文本（终端、部分编辑器）→ 焦点元素拿不到可用的文本
+    //   · 密码框                    → 系统明确标记，**绝不能读**
+    //
+    // 所以按"从便宜到贵"逐级尝试，并把走到第几级记下来 ——
+    // 这样能按 App 统计出"谁需要哪一级"，而不是笼统地说"读不到"。
 
+    /// 读取走到了哪一级。用于日志与按 App 的诊断。
+    enum ReadStrategy: String {
+        case systemFocus = "系统焦点"
+        case appFocus = "App 焦点"
+        case appTree = "App 树内查找"
+    }
+
+    /// 每个 App 最近一次成功读到所用的级别（App 名 → 级别）。
+    private(set) static var strategyByApp: [String: String] = [:]
+
+    /// 系统级焦点元素。绝大多数原生 App 走这条就够了。
     static func focusedElement() -> AXUIElement? {
         let system = AXUIElementCreateSystemWide()
-        // 焦点元素查询同样封顶 1 秒 —— 目标 App 卡住时不能把主线程拖死
-        AXUIElementSetMessagingTimeout(system, 1.0)
+        AXUIElementSetMessagingTimeout(system, axTimeout)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &value) == .success,
               let element = value, CFGetTypeID(element) == AXUIElementGetTypeID() else { return nil }
         return (element as! AXUIElement)
     }
 
-    /// 告诉目标 App「有辅助技术在用，请把你的输入框暴露出来」。
+    /// **App 级**的焦点元素。
+    /// 有些实现只在自己那一层报焦点，系统级查询拿不到。
+    static func appFocusedElement(pid: pid_t) -> AXUIElement? {
+        guard pid > 0 else { return nil }
+        let app = bounded(AXUIElementCreateApplication(pid))
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &value) == .success,
+              let element = value, CFGetTypeID(element) == AXUIElementGetTypeID() else { return nil }
+        return (element as! AXUIElement)
+    }
+
+    /// **密码框绝不读取。**
+    /// 系统会给 `AXSecureTextField` 这个明确的 subrole 标记；
+    /// 拿不准的时候一律当密码框处理 —— 学习功能再重要也不能碰用户的密码。
+    static func isSecure(_ element: AXUIElement) -> Bool {
+        (stringAttribute(element, kAXSubroleAttribute) ?? "") == "AXSecureTextField"
+    }
+
+    /// 已经打过招呼的 App（按 pid）。
+    private static let announcedLock = NSLock()
+    private static var announcedPids = Set<pid_t>()
+    /// 声明用的后台队列（串行，避免同时对多个 App 写属性）。
+    private static let announceQueue = DispatchQueue(
+        label: "ai.deepseek.dsh.voice.announce", qos: .utility
+    )
+
+    /// 告诉目标 App「有辅助技术在场，请把你的辅助功能树建起来」。
     ///
-    /// ## 为什么必须做这一步
+    /// Chromium 系（Electron、Edge、飞书、各种桌面端）默认**不构建辅助功能树**，
+    /// 只在检测到辅助技术时才建。Electron 官方文档写明：第三方软件可以通过
+    /// 设置 `AXManualAccessibility` 属性来打开它。
     ///
-    /// Chromium 系（Electron、Edge、飞书、各种桌面端）默认**不构建辅助功能树** ——
-    /// 它们只在检测到辅助技术时才建。Electron 官方文档写明：
-    /// 第三方软件可以通过设置 `AXManualAccessibility` 属性来打开它。
+    /// **这一条被回退过一次，原因是误判。** 2026-10-08 当时以为是它弄坏了飞书，
+    /// 后来查明真凶是飞书自己的 Fn 快捷键抢走麦克风、并一直不释放。
+    /// 所以恢复它 —— 它是覆盖 Electron 系那一大类 App 的唯一办法。
     ///
-    /// 我们原先只读不设，所以这些 App 的输入框内容根本拿不到。实测日志里
-    /// 同一个 App 20 秒内一好一坏（累计读得到 73 次 / 读不到 16 次），
-    /// 正是"按需建树、闲置就关"的特征。
-    ///
-    /// 只设一次（按 pid 记账）：Electron 会记住，反复设只是浪费。
-    /// App 重启后 pid 会变，自然重新声明。
+    /// 两条硬约束（都是踩过的坑）：
+    ///   · **异步**：这是写另一个 App 的属性，对方忙时同步调用会把我们
+    ///     主线程一起拖死。而主线程上还挂着 Fn 事件监听 ——
+    ///     后果就是"按 Fn 完全没反应"。
+    ///   · **设超时**：默认超时很长，目标无响应时拖到天荒地老。
     static func announceAccessibility(to pid: pid_t) {
-        // **已回退，不要重新打开。**
-        //
-        // 曾经在这里对目标 App 写 AXManualAccessibility，想让 Chromium 系
-        // （Electron/Edge/飞书）构建无障碍树，从而能读到它们的输入框。
-        //
-        // 结果：**飞书的语音输入直接被弄坏**（用户报告"上午还正常"，
-        // 下午就不好用了），而且不是阻塞问题 —— 改成后台异步 + 0.5 秒超时
-        // 之后依然不好用。说明是那个属性本身改变了对方 App 的行为。
-        //
-        // 教训：**为了"读"去写另一个 App 的内部开关，代价太大。**
-        // 读取失败顶多是学不到词，用「从最近记录里挑一条纠正…」能补；
-        // 但把用户的输入法弄坏是不可接受的。所以这个功能不值得。
-        //
-        // 保留空实现是为了让调用点不必散落判断，将来若要用别的手段
-        // 解决 Electron 读取问题，从这里换实现即可。
-        _ = pid
+        guard pid > 0, pid != ProcessInfo.processInfo.processIdentifier else { return }
+        announcedLock.lock()
+        let alreadyAnnounced = announcedPids.contains(pid)
+        if !alreadyAnnounced { announcedPids.insert(pid) }
+        announcedLock.unlock()
+        guard !alreadyAnnounced else { return }
+
+        announceQueue.async {
+            let app = AXUIElementCreateApplication(pid)
+            AXUIElementSetAttributeValue(
+                Self.bounded(app), "AXManualAccessibility" as CFString, kCFBooleanTrue
+            )
+        }
     }
 
-    /// 列出这个元素**真正提供**的辅助功能属性名。
-    ///
-    /// 排查"读不到内容"时最有用的一步：能直接看出对方是
-    /// 「根本没暴露」还是「暴露在别的属性上」。
-    static func attributeNames(of element: AXUIElement) -> [String] {
-        bounded(element)
-        var names: CFArray?
-        guard AXUIElementCopyAttributeNames(element, &names) == .success,
-              let list = names as? [String] else { return [] }
-        return list.sorted()
-    }
+    /// 读当前焦点输入框：逐级降级，返回第一个读到的结果。
+    static func readFocusedText() -> (element: AXUIElement, text: String)? {
+        let app = NSWorkspace.shared.frontmostApplication
+        let appName = app?.localizedName ?? "未知应用"
+        let pid = app?.processIdentifier ?? 0
 
-    /// 把元素上能读到的文本相关属性全试一遍，返回第一个非空结果。
-    ///
-    /// 不同实现把文本放在不同地方：原生控件用 AXValue，
-    /// 网页输入框有时只认 AXStringForRange。一条一条试比猜一个靠谱。
-    static func anyText(of element: AXUIElement) -> String? {
-        if let text = stringAttribute(element, kAXValueAttribute), !text.isEmpty { return text }
-        if let text = stringAttribute(element, "AXSelectedText"), !text.isEmpty { return text }
+        // ① 系统级焦点元素 —— 最便宜，原生 App 到这就够了
+        beginRead()
+        if let element = focusedElement(), !isSecure(element), let text = value(of: element) {
+            record(strategy: .systemFocus, app: appName)
+            return (element, text)
+        }
+
+        // ② 顺手向这个 App 打个招呼（异步，不阻塞）。
+        //    Chromium 系收到之后才会去建树，而建树是异步的 ——
+        //    所以这一步在**录音开始**时就已经做过一次了，这里只是兜底。
+        announceAccessibility(to: pid)
+
+        // ③ App 级焦点元素 —— 有些实现只在自己这层报焦点
+        nextLevel()
+        if let element = appFocusedElement(pid: pid), !isSecure(element), let text = value(of: element) {
+            record(strategy: .appFocus, app: appName)
+            return (element, text)
+        }
+
+        // ④ 在 App 的 AX 树里找一个文本控件 —— 最贵，所以放最后，且严格限量
+        nextLevel()
+        if let found = findTextElement(inApp: pid) {
+            record(strategy: .appTree, app: appName)
+            return found
+        }
+
+        Log.shared.info("学习：\(appName) 三级读取都没拿到文本（策略=\(ReadStrategy.systemFocus.rawValue)→\(ReadStrategy.appFocus.rawValue)→\(ReadStrategy.appTree.rawValue)）")
         return nil
     }
 
-    /// 读当前焦点输入框：先声明辅助功能，再读。
+    private static func record(strategy: ReadStrategy, app: String) {
+        let name = strategy.rawValue
+        guard strategyByApp[app] != name else { return }
+        strategyByApp[app] = name
+        // 只在级别变化时记一行，避免刷屏；这一行能直接回答
+        // "这个 App 需要走到第几级" —— 之前完全没有这个信息
+        Log.shared.info("学习：\(app) 用「\(name)」读到了输入框")
+    }
+
+    /// 在 App 的 AX 树里广度优先找一个能读出文本的控件。
     ///
-    /// 这是所有读取路径的统一入口 —— 把"声明"和"读取"绑在一起，
-    /// 避免有人漏掉声明那一步又回到"读不到 Electron 输入框"的老问题。
-    ///
-    /// @returns (元素, 文本)；读不到返回 nil
-    static func readFocusedText() -> (element: AXUIElement, text: String)? {
-        beginRead()
-        guard let element = focusedElement(), let text = value(of: element) else { return nil }
-        return (element, text)
+    /// 严格限量：最多访问 40 个元素、只看前 20 个子节点。
+    /// 这一步最贵，而且是在主线程上做的 —— 越界就是"Fn 没反应"。
+    static func findTextElement(inApp pid: pid_t, limit: Int = 40) -> (AXUIElement, String)? {
+        guard pid > 0 else { return nil }
+        var queue: [AXUIElement] = [bounded(AXUIElementCreateApplication(pid))]
+        var visited = 0
+        while !queue.isEmpty, visited < limit {
+            guard spendAXCall() else { return nil }   // 预算用尽就放弃，绝不拖主线程
+            let element = queue.removeFirst()
+            visited += 1
+            let role = stringAttribute(element, kAXRoleAttribute) ?? ""
+            if (role == "AXTextArea" || role == "AXTextField"), !isSecure(element),
+               let text = anyText(of: element) {
+                return (element, text)
+            }
+            if let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] {
+                queue.append(contentsOf: children.prefix(20))
+            }
+        }
+        return nil
+    }
+
+    /// 读一段区间内的文本。网页输入框（Chromium 系）常常只认这条路。
+    static func stringForRange(of element: AXUIElement) -> String? {
+        guard spendAXCall() else { return nil }
+        var length: Int?
+        if let raw = attribute(element, "AXNumberOfCharacters"), let count = raw as? Int, count > 0 {
+            length = count
+        }
+        // 拿不到总长度就按"我们能处理的上限 + 1"问一次 —— 够判断是否过长即可
+        let asked = min(length ?? (maxWatchedCharacters + 1), maxWatchedCharacters + 1)
+        var range = CFRange(location: 0, length: asked)
+        guard let rangeValue = AXValueCreate(.cfRange, &range) else { return nil }
+        var result: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+            element, kAXStringForRangeParameterizedAttribute as CFString, rangeValue, &result
+        ) == .success, let text = result as? String, !text.isEmpty else { return nil }
+        return text
+    }
+
+    /// 把元素上能读到文本的方式逐条试一遍。
+    static func anyText(of element: AXUIElement) -> String? {
+        if let text = stringAttribute(element, kAXValueAttribute), !text.isEmpty { return text }
+        if let text = stringAttribute(element, "AXSelectedText"), !text.isEmpty { return text }
+        if let text = stringForRange(of: element) { return text }
+        return nil
     }
 
     /// 读输入框当前文本。读不到（App 不暴露）返回 nil。
-    ///
-    /// 只试 `kAXValueAttribute` 是不够的：不同 App 把可编辑文本放在不同地方。
-    /// 实测（2026-10-07）用户在一个 App 里连续 10 次听写都读到"不提供文本"，
-    /// 整条学习链根本没启动，而日志里只有一句"跳过"。
-    ///
-    /// 所以按可能性依次尝试，尽量多救回一些 App：
-    ///   1. 焦点元素自身的 value（绝大多数 App）
-    ///   2. 焦点元素的选中文本（有些把内容放在这里）
-    ///   3. 焦点元素的父级 value（文本框外面套一层滚动区的情况）
-    ///   4. 焦点元素子树里的第一个文本区（网页输入框常见）
     static func value(of element: AXUIElement, depth: Int = 0) -> String? {
         bounded(element)
         if let direct = anyText(of: element) { return direct }
@@ -428,38 +526,50 @@ final class EditWatcher {
         NSWorkspace.shared.frontmostApplication?.localizedName ?? "未知应用"
     }
 
-    /// **一次读取允许发起的 AX 调用总数。**
+    /// 列出这个元素**真正提供**的辅助功能属性名。
+    /// 排查"读不到内容"时最有用的一步：能直接看出对方是
+    /// 「根本没暴露」还是「暴露在别的属性上」。
+    static func attributeNames(of element: AXUIElement) -> [String] {
+        bounded(element)
+        var names: CFArray?
+        guard AXUIElementCopyAttributeNames(element, &names) == .success,
+              let list = names as? [String] else { return [] }
+        return list.sorted()
+    }
+
+    /// 跨进程 AX 调用的超时（秒）。
     ///
-    /// 这是今天最严重的一个坑，必须写清楚：
+    /// 这些调用都是在主线程上做的，目标 App 卡住时会**把主线程一起拖死** ——
+    /// 而 Fn 事件监听也挂在同一根线程上。0.5 秒：正常 App 的 AX 调用是毫秒级，
+    /// 这个值给足余量；卡住的 App 最多让我们等半秒。
+    static let axTimeout: Float = 0.5
+
+    /// **一次读取允许发起的 AX 调用总数**（每一级各自计一次）。
     ///
     /// `value(of:)` 会递归找父级和子元素（深度 3、每层最多 8 个），最坏约
-    /// 2000 次跨进程 AX 调用。只给**单次**调用封顶是不够的 —— 每次就算 1ms，
-    /// 2000 次也是 2 秒；目标 App（Electron 系）响应慢时更长。
-    ///
-    /// 要命的是它跑在**主线程**上，而 Fn 事件监听的 run loop source 也挂在
-    /// 主线程上。主线程一卡，Fn 事件根本不处理 —— 用户看到的就是
-    /// 「在这个 App 里按 Fn 完全没反应」。
-    ///
-    /// 而这条慢路径**只在读不到 AXValue 的 App 里才会走到**（微信/原生控件
-    /// 第一次调用就返回了，Electron 系才会一路递归到底）—— 这正好解释了
-    /// 为什么偏偏是飞书、Edge 这类 App 出问题。
-    ///
-    /// 所以：宁可读不到（顶多是这次学不到词），也绝不能把主线程卡住。
-    /// 60 次足够覆盖正常的父级/子元素查找。
-    /// 一次读取的调用数上限。正常 App 每次调用是毫秒级，60 次 ≈ 几十毫秒。
+    /// 2000 次跨进程调用。只给**单次**调用封顶是不够的。所以还给一整次读取
+    /// 加"次数 + 墙钟"双闸：宁可读不到（顶多这次学不到词），
+    /// 也绝不能把主线程卡住 —— 那会让 Fn 完全没反应。
     private static let maxAXCallsPerRead = 60
-    /// 一次读取的**墙钟**上限。光靠计数挡不住最坏情况 ——
-    /// 如果每次都刚好卡到 0.5 秒超时，60 次就是 30 秒。
-    /// 目标不响应时必须有个时间上的硬闸。
-    private static let readBudgetSeconds: TimeInterval = 0.25
-    /// 本次读取已发起的调用数与开始时刻。只在主线程用，不需要加锁。
+    /// **整条读取链**共享的时间闸（不是每级各一份）。
+    ///
+    /// 为什么必须是整条链：三级各自 0.25 秒的话，最坏 0.75 秒一次；
+    /// 而 settle 在等粘贴落地时会重试最多 24 次 —— 最坏就是十几秒的
+    /// 主线程碎片阻塞，而 Fn 事件监听挂在同一根线程上。
+    /// 共享一个闸之后，一整次读取最多 0.4 秒，与走几级无关。
+    private static let readBudgetSeconds: TimeInterval = 0.4
     private static var axCallsThisRead = 0
     private static var readStartedAt = Date()
 
-    /// 开始一次新的读取：重置预算。
+    /// 开始一次新的读取（整条链只调一次）：重置次数计数与时间闸。
     static func beginRead() {
         axCallsThisRead = 0
         readStartedAt = Date()
+    }
+
+    /// 进入下一级：只重置次数计数，**时间闸继续累计**。
+    private static func nextLevel() {
+        axCallsThisRead = 0
     }
 
     /// 记一次调用并判断是否还有预算（次数与时间双闸）。
@@ -468,14 +578,6 @@ final class EditWatcher {
         axCallsThisRead += 1
         return axCallsThisRead <= maxAXCallsPerRead
     }
-
-    /// 跨进程 AX 调用的超时（秒）。
-    ///
-    /// 这些调用都是在主线程上做的，目标 App 卡住时会**把主线程一起拖死**。
-    /// 实测后果：按 Fn 结束不了录音、飞书里语音输入失效。
-    /// 0.5 秒：正常 App 的 AX 调用是毫秒级，这个值给足了余量；
-    /// 卡住的 App 最多让我们等半秒，而不是拖死整条录音流程。
-    private static let axTimeout: Float = 0.5
 
     /// 给元素设上超时再操作。
     @discardableResult
@@ -486,7 +588,7 @@ final class EditWatcher {
 
     /// 读一个 AX 属性。
     static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
-        guard spendAXCall() else { return nil }   // 超出本次预算就放弃，不拖主线程
+        guard spendAXCall() else { return nil }
         bounded(element)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
