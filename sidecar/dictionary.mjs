@@ -25,6 +25,7 @@
  */
 
 import fs from 'node:fs';
+import { windowScore } from './phonetic.mjs';
 
 /** 有意义的最小单元：一个汉字，或一段连续的西文/数字。 */
 const TOKEN_RE = /[\u4e00-\u9fff]|[A-Za-z0-9][A-Za-z0-9'’._-]*/gu;
@@ -72,18 +73,19 @@ export function alignmentGaps(raw, out) {
   }
 
   const gaps = [];
-  let gap = { raw: [], out: [], outIndexes: [] };
+  let gap = { raw: [], out: [], rawIndexes: [], outIndexes: [] };
   let i = 0;
   let j = 0;
   while (i < n && j < m) {
     if (sameToken(raw[i], out[j])) {
       // 匹配上 = 锚点，当前段结束
       if (gap.raw.length || gap.out.length) gaps.push(gap);
-      gap = { raw: [], out: [], outIndexes: [] };
+      gap = { raw: [], out: [], rawIndexes: [], outIndexes: [] };
       i += 1;
       j += 1;
     } else if (dp[i + 1][j] >= dp[i][j + 1]) {
       gap.raw.push(raw[i]);
+      gap.rawIndexes.push(i);
       i += 1;
     } else {
       gap.out.push(out[j]);
@@ -161,6 +163,85 @@ export function stripFabricatedTerms(raw, polished, terms) {
 }
 
 /**
+ * 把「LLM 硬套词表」的地方改回原文。
+ *
+ * ## 为什么需要（实测 2026-10-11）
+ *
+ * 用户报："很多类似于奇绩创坛的输入都会被自动修正为奇绩创坛"。
+ * 日志里的真实案例：
+ *
+ *   raw 其迹算里  → out 奇绩创坛   hits ["llm"]
+ *   raw 奇迹三力  → out 奇绩创坛   hits ["llm"]
+ *
+ * 用户说的是「奇绩**算力**」，LLM 因为词表里有「奇绩创坛」，看到前半段
+ * 读音对得上就把**整个词**套了上去。
+ *
+ * ## 判据：这个词在原文里有没有"读音痕迹"
+ *
+ * 在原文上滑一个等长窗口，取最高相似度：
+ *
+ *   其迹算里 → 奇绩创坛   0.500   ← 没痕迹 = 硬套
+ *   奇迹三力 → 奇绩创坛   0.500   ← 没痕迹 = 硬套
+ *   奇迹创谈 → 奇绩创坛   1.000   ← 有痕迹 = 正常的同音纠正，放行
+ *   用户测自净化 → 用户侧自进化 0.933 ← 有痕迹，放行
+ *
+ * 阈值 0.6：离硬套（≤0.5）和已知最低的合法案例（0.933）都有余量。
+ *
+ * ## 为什么**只处理中文词**
+ *
+ * `tys → Typeless` 这类西文缩写还原，相似度只有 0.25，本来就"没痕迹" ——
+ * 而那正是最需要 LLM 补的一类。所以西文词一律豁免，只拦中文词：
+ * 中文的读音纠正交给本地拼音层（阈值 0.85，有校准），
+ * 不需要 LLM 在这里自由发挥。
+ *
+ * @param {string} raw ASR 原文
+ * @param {string} polished LLM 输出
+ * @param {string[]} terms 词表
+ * @param {{threshold?: number}} [options]
+ * @returns {{text: string, reverted: string[]}}
+ */
+export function revertUnanchoredTerms(raw, polished, terms, options = {}) {
+  const threshold = options.threshold ?? 0.6;
+  if (!terms?.length || !polished || !raw) return { text: polished, reverted: [] };
+
+  const hasCJK = (text) => /[\u4e00-\u9fff]/u.test(text);
+  let text = polished;
+  const reverted = [];
+
+  for (const term of terms) {
+    if (!hasCJK(term)) continue;            // 西文词豁免（见上）
+    if (!text.includes(term)) continue;     // 输出里根本没出现，不用管
+
+    const best = bestAnchor(raw, term);
+    if (best.score >= threshold) continue;  // 原文里有读音痕迹 → 正常的同音纠正
+
+    reverted.push(term);
+    // 换回原文里最像的那一段 —— 那才是用户实际说的东西。
+    // 原文里连等长窗口都没有（说明原文更短）就删掉，
+    // 因为"原文里没有这个词"是确定的。
+    text = text.split(term).join(best.window);
+  }
+
+  return { text, reverted };
+}
+
+/**
+ * 在 raw 上滑一个和 term 等长的窗口，取相似度最高的那个。
+ * @returns {{score: number, window: string}}
+ */
+function bestAnchor(raw, term) {
+  const rawChars = Array.from(raw);
+  const length = Array.from(term).length;
+  let best = { score: 0, window: '' };
+  for (let i = 0; i + length <= rawChars.length; i += 1) {
+    const window = rawChars.slice(i, i + length).join('');
+    const score = windowScore(window, term);
+    if (score > best.score) best = { score, window };
+  }
+  return best;
+}
+
+/**
  * 把词表渲染成要追加到 system prompt 的段落。
  * 没有词表时返回空串 —— 完全不影响现有行为。
  * @param {string[]} terms
@@ -170,8 +251,13 @@ export function renderVocabularyPrompt(terms) {
   if (!clean.length) return '';
   return [
     '',
-    '用户专有名词表（这些是正确写法。识别结果里出现**发音相近**的错误写法时，改成本表里的写法）：',
+    '用户专有名词表（这些是正确写法）：',
     clean.join('、'),
+    '',
+    '**只在整段读音都对得上时才替换。** 反例：识别结果里是「奇绩算力」，',
+    '不要因为表里有「奇绩创坛」就改过去 —— 前半段读音一样、后半段是另一个词。',
+    '中文的读音纠正本地已经有一层在做了，你的重点是英文/缩写（如 tys → Typeless）。',
+    '宁可不改，也不要改错。',
     '',
     '关于中英混说：用户经常在中文里夹英文单词或短语（如 prompt、deploy、staging）。',
     '**他说英文的地方必须保持英文，不要翻译成中文**；英文拼错时按语境还原成正确拼写。',

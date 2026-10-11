@@ -18,7 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { alignmentGaps, tokenize } from './dictionary.mjs';
-import { applyTerms } from './phonetic.mjs';
+import { applyTerms, windowScore } from './phonetic.mjs';
 
 /**
  * 候选词的置信度。
@@ -92,6 +92,18 @@ const isUsefulToken = (token) => /[\u4e00-\u9fffA-Za-z]/.test(token);
 const CJK_CONTEXT = 2;
 /** 抽出来的中文术语最长多少字。 */
 const MAX_CJK_TERM = 6;
+/**
+ * 「这次改动是识别错误，还是用户改主意」的读音阈值。
+ *
+ * 判据来自观察：识别错误会**保留读音**（你说的是同一句话，机器写错了），
+ * 改主意会**改变读音**（你换了说法）。实测（2026-10-11，用户真实修订）：
+ *
+ *   路奇博士 → 陆奇博士   相似度 1.00  ← 识别错误，该学
+ *   不错     → 很好       相似度 0.00  ← 改说法，不该学
+ *
+ * 取 0.7：同音/近音稳妥通过；换了说法的必然远低于此。
+ */
+const MISRECOGNITION_SIMILARITY = 0.7;
 
 /**
  * 常见虚词/功能字。
@@ -112,6 +124,25 @@ const isFunctionChar = (char) => FUNCTION_CHARS.has(char);
  * 不合并就只能抽出 `奇绩`、`创坛` 两个碎片，合起来才是完整术语。
  */
 const MERGE_DISTANCE = 2;
+
+/**
+ * 这次改动像"识别错误"还是"改主意"。
+ *
+ * 识别错误**保留读音**（你说了同一句话，机器写错了）；改主意**改变读音**。
+ * 只在长度相同时用读音判据 —— 长度不同说明是增删内容，
+ * 那属于"改主意"的形态（实测 20 条真实修订里 12 条是纯删除）。
+ *
+ * @param {string} rawSpan 原文里被改掉的那一段（**连续**切片，见下面的合并逻辑）
+ * @param {string} correctedRun 改后那一段
+ * @returns {boolean}
+ */
+function looksLikeMisrecognition(rawSpan, correctedRun) {
+  if (!rawSpan || !correctedRun) return false;
+  const a = Array.from(rawSpan);
+  const b = Array.from(correctedRun);
+  if (a.length !== b.length) return false;   // 长度不同 = 增删内容，不是同音写错
+  return windowScore(rawSpan, correctedRun) >= MISRECOGNITION_SIMILARITY;
+}
 
 /**
  * 从一次 (原文, 改正后) 里抽出候选术语。
@@ -139,13 +170,27 @@ export function extractTerms(raw, corrected) {
     if (!gap.out.length || !gap.outIndexes.length) continue;
     const start = gap.outIndexes[0];
     const end = gap.outIndexes[gap.outIndexes.length - 1];
+    const rawStart = gap.rawIndexes[0];
+    const rawEnd = gap.rawIndexes[gap.rawIndexes.length - 1];
     const last = merged[merged.length - 1];
     if (last && start - last.end <= MERGE_DISTANCE) {
       last.end = Math.max(last.end, end);
       last.rawCount += gap.raw.length;
+      // 原文侧记**下标范围**，最后统一切片 —— 不能把各段的 raw 拼起来。
+      //
+      // 踩过的坑（2026-10-11）：用户测自净化 → 用户侧自进化 会被切成
+      // 「测→侧」「净→进」两段，中间夹着没变的「自」。拼起来是「测净」，
+      // 而改正侧是「侧自进」，两边错位 → 读音判据算出 0.000，
+      // 把一个正确的学习信号整条丢掉。
+      last.rawStart = Math.min(last.rawStart, rawStart);
+      last.rawEnd = Math.max(last.rawEnd, rawEnd);
     } else {
-      merged.push({ start, end, rawCount: gap.raw.length });
+      merged.push({ start, end, rawCount: gap.raw.length, rawStart, rawEnd });
     }
+  }
+  // 切原文：得到覆盖整段改动的**连续**文本
+  for (const group of merged) {
+    group.rawText = rawTokens.slice(group.rawStart, group.rawEnd + 1).join('');
   }
 
   // 2. 每组取改正侧的完整跨度，切成中文/西文片段
@@ -157,8 +202,13 @@ export function extractTerms(raw, corrected) {
       if (!run) return;
       let text = run.text;
       let confidence = 0;
+      // 上下文扩展前的原样 —— 扩展会带上没变过的字，拿它比对会让相似度失真
+      const runText = text;
       if (run.kind === 'cjk') {
         const originalLength = text.length;
+        // **这次改动像"识别错误"吗？** 不像就当成用户改主意，不学 ——
+        // 这是记忆被污染的主要来源（实测：改说法的编辑会被当成术语学进去）。
+        if (!looksLikeMisrecognition(group.rawText, runText)) { run = null; return; }
         // 单字且本身就是虚词 → 这是 `吧→把` 那类虚词修正，不是术语
         if (originalLength === 1 && isFunctionChar(text)) { run = null; return; }
         // 往前带没变过的字当上下文（`绩创坛` → `奇绩创坛`、`翊` → `赵天翊`）。

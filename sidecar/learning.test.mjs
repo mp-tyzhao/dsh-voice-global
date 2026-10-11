@@ -162,6 +162,38 @@ console.log('\n— 置信度分级与待定区 —');
 }
 
 console.log();
+
+// ── 识别错误 vs 改主意（读音判据）──────────────────────────────────
+// 全部来自用户 2026-10-11 的真实修订。
+// 判据：识别错误会**保留读音**（说的是同一句话，机器写错了）；
+//       改主意会**改变读音**（换了说法）。用读音相似度区分。
+console.log('\n— 识别错误 vs 改主意 —');
+{
+  const shouldLearn = [
+    ['来，我们直接去问路奇博士的时间', '来，我们直接去问陆奇博士的时间', '路奇→陆奇'],
+    ['你看看用户测自净化这两个词', '你看看用户侧自进化这两个词', '测自净化→侧自进化'],
+    ['识别给出了奇迹创谈', '识别给出了奇绩创坛', '奇迹创谈→奇绩创坛'],
+  ];
+  for (const [raw, corr, label] of shouldLearn) {
+    const terms = extractTerms(raw, corr).map((c) => c.term);
+    const ok = terms.length > 0;
+    if (!ok) failures += 1;
+    console.log(`${ok ? 'PASS' : 'FAIL'}  该学：${label} → ${terms.join('、') || '（没学到）'}`);
+  }
+  const shouldNotLearn = [
+    ['这个方案不错', '这个方案很好', '不错→很好（改说法）'],
+    ['我说地图不需要调整', '我说不需要调整', '删掉一个词'],
+    ['有配置好的飞书 CI 可以直接看', '有配置好的飞书 可以直接看', '删掉 CI'],
+  ];
+  for (const [raw, corr, label] of shouldNotLearn) {
+    const terms = extractTerms(raw, corr).map((c) => c.term);
+    const ok = terms.length === 0;
+    if (!ok) failures += 1;
+    console.log(`${ok ? 'PASS' : 'FAIL'}  不该学：${label} → ${terms.join('、') || '（正确地没学）'}`);
+  }
+}
+
+
 if (failures === 0) {
   console.log('ALL PASS');
   process.exit(0);

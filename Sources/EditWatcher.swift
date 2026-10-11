@@ -44,6 +44,9 @@ final class EditWatcher {
     private var pasted: String = ""
     private var raw: String = ""
     private var deadline = Date()
+    /// 上一次轮询看到的新内容。用来要求"连续两次一致"才认定是用户的最终修改
+    /// （见 poll()：避开拼音输入打到一半的中间态 —— 实测那是记忆被污染的主因）。
+    private var pendingEdit: String?
 
     private let config: VoiceConfig
     private let sidecar: Sidecar
@@ -225,8 +228,25 @@ final class EditWatcher {
         let now = read.text
         guard now != before else {
             trace("内容未变（\(now.count) 字）")
+            pendingEdit = nil
             return
         }
+
+        // **内容变了，但先别急着下结论。**
+        //
+        // 用户听写完往往马上开始打下一句，而中文是拼音输入 —— 我们在
+        // 60 秒窗口里很容易采到"拼音打到一半"的中间态。实测（2026-10-11）
+        // 20 条修订里有 3 条是这种垃圾（「无层叠加」→「tu层叠加」、
+        // 「你全选择录体格式」→「ni jue de」），词表里的 `nijuede` 就是这么来的。
+        //
+        // 所以要求内容**连续两次轮询一致**才算定稿。多等 1.2 秒，
+        // 换来的是不把打字中间态当成"用户的修正"学进去。
+        if pendingEdit != now {
+            pendingEdit = now
+            trace("内容变了，等它稳定（\(now.count) 字）")
+            return
+        }
+        pendingEdit = nil
 
         // 判断"还是不是同一段文本"，而不是"还是不是同一个 AX 元素"。
         //
@@ -496,9 +516,19 @@ final class EditWatcher {
     }
 
     /// 把元素上能读到文本的方式逐条试一遍。
+    /// 读元素上的文本。**空串是合法值，不是"读不到"。**
+    ///
+    /// 踩过的坑（2026-10-11）：这里原来写的是 `!text.isEmpty` 才返回，
+    /// 于是"输入框被清空"（用户把消息发出去了）被当成"读取失败"。
+    /// 日志里 DSH GUI 报了 15 次「三级读取都没拿到」，我差点去查一个
+    /// 不存在的读取故障 —— 实际绝大多数是"你按了回车把消息发出去"。
+    ///
+    /// 判据要区分两种情况：
+    ///   · 属性存在但内容为空 → 读到了，内容就是空的
+    ///   · 属性根本不存在     → 读不到（attribute() 返回 nil）
     static func anyText(of element: AXUIElement) -> String? {
-        if let text = stringAttribute(element, kAXValueAttribute), !text.isEmpty { return text }
-        if let text = stringAttribute(element, "AXSelectedText"), !text.isEmpty { return text }
+        if let raw = attribute(element, kAXValueAttribute), let text = raw as? String { return text }
+        if let raw = attribute(element, "AXSelectedText"), let text = raw as? String { return text }
         if let text = stringForRange(of: element) { return text }
         return nil
     }
@@ -512,7 +542,7 @@ final class EditWatcher {
         if let parentRef = attribute(element, kAXParentAttribute),
            CFGetTypeID(parentRef) == AXUIElementGetTypeID() {
             let parent = parentRef as! AXUIElement
-            if let up = stringAttribute(parent, kAXValueAttribute), !up.isEmpty { return up }
+            if let up = stringAttribute(parent, kAXValueAttribute) { return up }
         }
 
         if let childrenRef = attribute(element, kAXChildrenAttribute),
@@ -521,7 +551,7 @@ final class EditWatcher {
                 let role = stringAttribute(child, kAXRoleAttribute) ?? ""
                 // 只往下找文本类控件，避免在大文档里乱翻
                 guard role.contains("Text") || role.contains("Area") || role.contains("Field") else { continue }
-                if let text = value(of: child, depth: depth + 1), !text.isEmpty { return text }
+                if let text = value(of: child, depth: depth + 1) { return text }
             }
         }
         return nil

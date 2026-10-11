@@ -31,7 +31,7 @@ import { existsSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { clean, trimEndPunctuation, softenMidSentencePeriods } from './cleanup.mjs';
 import { polish, isPlausible } from './llm.mjs';
-import { loadTerms, renderVocabularyPrompt, stripFabricatedTerms } from './dictionary.mjs';
+import { loadTerms, renderVocabularyPrompt, stripFabricatedTerms, revertUnanchoredTerms } from './dictionary.mjs';
 import { applyTerms, selectRelevantTerms } from './phonetic.mjs';
 import { loadProfile, buildModelConfig, decodingMethod, supportsHotwords, discoverProfiles } from './profiles.mjs';
 
@@ -439,6 +439,20 @@ async function handle({ wavPath, language = DEFAULT_LANGUAGE, cleanup = 'rules' 
           const guarded = process.env.VOICE_GLOBAL_NO_FABRICATION_GUARD === '1'
             ? { text, removed: [] }
             : stripFabricatedTerms(raw, text, vocabulary.terms);
+          // 硬套词表的兜底：LLM 看到词表里有「奇绩创坛」，会把读音相近的
+          // 「奇绩算力」整个套上去。上线前实测过（2026-10-11）：
+          // 其迹算里 / 奇迹三力 都被改成了 奇绩创坛。
+          // 判据是拼音相似度，只拦中文词（西文缩写还原本来就"没痕迹"）。
+          if (vocabulary.terms.length) {
+            const anchored = revertUnanchoredTerms(raw, text, vocabulary.terms);
+            if (anchored.reverted.length) {
+              log(`撤销硬套的词表词：${anchored.reverted.join('、')}`);
+              // 重建会丢标点，跑一次规则层补回来（和上面同一套处理）
+              text = clean(anchored.text, { spaceCJK: false }).text;
+              hits = [...hits, ...anchored.reverted.map((term) => `overapplied:${term}`)];
+            }
+          }
+
           if (guarded.removed.length) {
             log(`撤销凭空插入的词表词：${guarded.removed.join('、')}`);
             // 重建文本会丢标点，跑一次规则层补回来
