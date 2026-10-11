@@ -27,7 +27,8 @@ import { readFileSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { clean, trimEndPunctuation, softenMidSentencePeriods } from './cleanup.mjs';
 import { polish, isPlausible } from './llm.mjs';
@@ -37,8 +38,56 @@ import { loadProfile, buildModelConfig, decodingMethod, supportsHotwords, discov
 
 const require = createRequire(import.meta.url);
 
-const MODEL_ROOT = process.env.VOICE_GLOBAL_MODEL_ROOT
-  || join(homedir(), '.voice-global', 'models');
+/**
+ * 模型根目录。**没设环境变量时自动探测**，而不是直接退回一个默认值。
+ *
+ * 踩过的坑（2026-10-11 发版时）：这里原来只认环境变量，
+ * 没设就退回 `~/.voice-global/models` —— 而模型实际装在
+ * `~/.dsh/speech-to-text/sensevoice/models`。后果是**发布前的全量回归
+ * 闸门 500 条全失败**，而报错只说"PATH 里没有 node，或模型路径不对"，
+ * 完全看不出是探测缺失。宿主 App 有探测（VoiceConfig.detectedModelRoot），
+ * 但那个探测只活在 App 里，命令行调用（回归、自测、手工排查）全都用不上。
+ *
+ * 现在候选顺序和宿主 App 保持一致，差别是这里**不写死模型名** ——
+ * 认"里面有任意一个带 profile.json 的模型目录"，换模型之后探测依然有效。
+ */
+const MODEL_ROOT = process.env.VOICE_GLOBAL_MODEL_ROOT || (() => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(here, '..', 'models'),                                        // 打包进 .app 时
+    join(homedir(), '.voice-global', 'models'),
+    join(homedir(), '.dsh', 'speech-to-text', 'sensevoice', 'models'),
+  ];
+
+  // 第一轮：**和宿主 App 完全一样的判据**（VoiceConfig.detectedModelRoot）。
+  // 必须一致 —— 否则命令行（回归、自测）和 App 会选到不同的模型，
+  // 回归通过而用户实际跑的却是另一个模型。
+  const sameAsApp = (root) => existsSync(join(root, 'sensevoice-onnx', 'model.int8.onnx'));
+  for (const root of candidates) if (sameAsApp(root)) return root;
+
+  // 第二轮：换成别的模型类型（whisper 之类）时也能用 ——
+  // 按档案解析出真实文件名逐个确认。注意 whisper 的档案用的是
+  // encoder/decoder 而不是 model，所以只认"档案里写了、且文件在"。
+  //
+  // 实测（2026-10-11）：~/.voice-global/models 下有一份 whisper-small，
+  // 档案里 model 为空。只看"有没有 profile.json"会误选中它，
+  // 然后在 sherpa-onnx 内部报 "tokens does not exist" —— 报错离原因很远。
+  const usable = (root) => {
+    try {
+      return readdirSync(root, { withFileTypes: true }).some((entry) => {
+        if (!entry.isDirectory()) return false;
+        const dir = join(root, entry.name);
+        let profile = {};
+        try { profile = JSON.parse(readFileSync(join(dir, 'profile.json'), 'utf8')); } catch { return false; }
+        const named = [profile.model, profile.encoder, profile.decoder, profile.tokens].filter(Boolean);
+        return named.length > 0 && named.every((name) => existsSync(join(dir, name)));
+      });
+    } catch { return false; }
+  };
+  for (const root of candidates) if (usable(root)) return root;
+
+  return candidates[1];
+})();
 // 模型目录先定下来，档案和权重文件都相对它解析。
 // 原先这里硬编码了 sensevoice-onnx 子目录，等于换模型必须改代码。
 const MODEL_DIR = process.env.VOICE_GLOBAL_MODEL_DIR || join(MODEL_ROOT, 'sensevoice-onnx');
