@@ -59,6 +59,10 @@ final class VoiceController {
         sidecar.removeTerms(terms, config: config, completion: completion)
     }
 
+    func undoLastLearning(completion: @escaping ([String], [String]) -> Void) {
+        sidecar.undoLastLearning(config: config, completion: completion)
+    }
+
     func mergeTerms(_ terms: [String], completion: @escaping ([String]) -> Void) {
         sidecar.mergeTerms(terms, config: config, completion: completion)
     }
@@ -108,7 +112,7 @@ final class VoiceController {
                 let more = added.count > 3 ? " 等 \(added.count) 个" : ""
                 self.hud.flash(
                     title: "已记住：\(shown)\(more)",
-                    detail: "下次会照这个写法纠正（菜单 → 学习 → 审查学到的词，可撤销）",
+                    detail: "下次会照这个写法纠正（菜单 → 学习 → 撤销上一次学到的词）",
                     seconds: 3.2
                 )
             } else {
@@ -672,6 +676,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mineItem.target = self
         learningMenu.addItem(mineItem)
 
+        let undoLearnItem = NSMenuItem(title: "撤销上一次学到的词", action: #selector(undoLastLearning), keyEquivalent: "")
+        undoLearnItem.target = self
+        learningMenu.addItem(undoLearnItem)
         let reviewItem = NSMenuItem(title: "审查学到的词…", action: #selector(reviewLearned), keyEquivalent: "")
         reviewItem.target = self
         learningMenu.addItem(reviewItem)
@@ -817,6 +824,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 调研里反复出现的一条：用户要能一眼看出哪些是系统自作主张加的。
     /// Typeless 用「Auto-added / Manually-added」两个桶，VoiceInk 用四种审查动作 ——
     /// 共同点是**必须能看懂、能撤销**，否则用户不敢让它继续学。
+    /// 撤销"最近一次学到的词"（连带纠正对子）。
+    ///
+    /// 浮窗提示里写的就是这条路 —— 看到「已记住」之后反悔，
+    /// 一步就能退回，不用去菜单里翻词表找那一个词。
+    @objc private func undoLastLearning() {
+        guard let controller else { return }
+        controller.undoLastLearning { [weak self] terms, pairs in
+            guard let self else { return }
+            guard !terms.isEmpty || !pairs.isEmpty else {
+                self.showAlert(title: "没有可撤销的学习", body: "最近一次没有学到新东西，或者已经撤销过了。")
+                return
+            }
+            var parts: [String] = []
+            if !terms.isEmpty { parts.append("词：\(terms.joined(separator: "、"))") }
+            if !pairs.isEmpty { parts.append("纠正对子：\(pairs.joined(separator: "、"))") }
+            self.showAlert(title: "已撤销", body: parts.joined(separator: "\n"))
+            Log.shared.info("撤销上一次学习：\(terms.joined(separator: "、")) / \(pairs.joined(separator: "、"))")
+        }
+    }
+
     /// 审查学到的词：删掉哪行就撤销哪个词；待确认的保留下来就转正。
     ///
     /// Typeless 用「Auto-added / Manually-added」两个桶，VoiceInk 用四种审查动作 ——

@@ -285,6 +285,20 @@ final class Sidecar {
         }
     }
 
+    /// 撤销"最近一次学到的词"。
+    ///
+    /// 和 removeTerms 分开：这个读 sidecar 落下的 last-learned.json，
+    /// **连对子一起撤**。用户看到「已记住」的浮窗反悔时，要撤的是
+    /// 这一整次学习的结果，而不是让他去菜单里翻词表。
+    func undoLastLearning(config: VoiceConfig, completion: @escaping ([String], [String]) -> Void) {
+        runLearner(arguments: ["--undo-last"], config: config) { object in
+            completion(
+                object["removed"] as? [String] ?? [],
+                object["pairs"] as? [String] ?? []
+            )
+        }
+    }
+
     /// 按词合并进词表（导入）
     func mergeTerms(_ terms: [String], config: VoiceConfig, completion: @escaping ([String]) -> Void) {
         guard !terms.isEmpty else { completion([]); return }

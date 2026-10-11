@@ -1,4 +1,6 @@
 /**
+      // 机器本来就会写对的通用术语，自动学习跳过（见 PUBLIC_TERMS）
+      if (isPublicTerm(candidate.term)) continue;
  * 从用户的改正中学习词表
  * ======================
  *
@@ -17,7 +19,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { alignmentGaps, tokenize } from './dictionary.mjs';
+import { alignmentGaps, tokenize, removeReplacements } from './dictionary.mjs';
 import { applyTerms, windowScore } from './phonetic.mjs';
 
 /**
@@ -56,6 +58,63 @@ export const MAX_TERMS = 1000;
  * 论文里还提到"长度 ≤ 2 的一律丢"，但那条对中文不适用 ——
  * 中文两字词（奇绩、创坛）是常态，照搬会把正常的词也丢掉。
  */
+/**
+ * 通用公开术语 —— **自动学习时跳过它们**。
+ *
+ * ## 为什么
+ *
+ * 这些词机器本来就会写对。你偶尔手改一次，多半是笔误或者一次性的听错，
+ * 学进来只会让词表变长、让提示变噪。VoiceInk 的 Auto Learn 有一模一样的
+ * 策略（Apple、Google、Xcode、Markdown、React、PostgreSQL、GitHub），
+ * 它的原话是这些"不是可复用的语音纠正"。
+ *
+ * ## 注意
+ *
+ * 只拦**自动学习**。你想加就手动加 —— 词表里现在就有 Kubernetes、Milvus，
+ * 那是你主动带进来的，不受这张表影响。
+ *
+ * 西文按小写精确匹配整词；中文按包含匹配（"微信"要能拦住"用微信发"）。
+ */
+const PUBLIC_TERMS = new Set([
+  // 大厂 / 品牌 / 产品
+  'apple', 'google', 'microsoft', 'amazon', 'meta', 'facebook', 'instagram', 'whatsapp',
+  'openai', 'anthropic', 'chatgpt', 'claude', 'gemini', 'copilot', 'nvidia', 'intel', 'amd',
+  'github', 'gitlab', 'bitbucket', 'gitee', 'docker', 'kubernetes', 'jenkins', 'vercel',
+  'netlify', 'heroku', 'aws', 'azure', 'gcp', 'cloudflare', 'nginx', 'redis', 'mongodb',
+  'postgresql', 'postgres', 'mysql', 'sqlite', 'elasticsearch', 'kafka', 'rabbitmq',
+  'slack', 'notion', 'figma', 'jira', 'confluence', 'zoom', 'dropbox', 'evernote',
+  'iphone', 'ipad', 'macbook', 'airpods', 'macos', 'ios', 'android', 'windows', 'linux',
+  'ubuntu', 'debian', 'chrome', 'safari', 'firefox', 'edge', 'telegram', 'discord',
+  // 编程语言 / 框架 / 常见技术词
+  'python', 'javascript', 'typescript', 'java', 'golang', 'rust', 'kotlin', 'swift',
+  'react', 'vue', 'angular', 'svelte', 'nextjs', 'nuxt', 'django', 'flask', 'rails',
+  'spring', 'laravel', 'express', 'nodejs', 'npm', 'yarn', 'pnpm', 'webpack', 'vite',
+  'html', 'css', 'sass', 'tailwind', 'json', 'yaml', 'xml', 'sql', 'graphql', 'rest',
+  'api', 'sdk', 'cli', 'http', 'https', 'tcp', 'udp', 'dns', 'cdn', 'jwt', 'oauth',
+  'markdown', 'latex', 'regex', 'git', 'bash', 'zsh', 'shell', 'terminal', 'vim', 'emacs',
+  'vscode', 'xcode', 'androidstudio', 'intellij', 'pycharm', 'postman', 'jupyter',
+  // 中文里机器本来就写得对的常见词
+  '微信', '支付宝', '淘宝', '天猫', '京东', '拼多多', '抖音', '快手', '小红书', '微博',
+  '知乎', '哔哩哔哩', '百度', '腾讯', '阿里', '字节跳动', '美团', '滴滴', '网易',
+  '苹果', '谷歌', '微软', '亚马逊', '华为', '小米', '钉钉', '飞书', '企业微信',
+]);
+
+/**
+ * 是不是"机器本来就会写对"的通用术语。
+ * 中文词要按包含匹配 —— 学到的往往是"用微信发"这种带上下文的片段。
+ */
+function isPublicTerm(term) {
+  const lower = term.toLowerCase();
+  if (PUBLIC_TERMS.has(lower)) return true;
+  // 中文：术语里包含某个通用词（且那个通用词占了大半）→ 也跳过
+  for (const known of PUBLIC_TERMS) {
+    if (!/[\u4e00-\u9fff]/.test(known)) continue;
+    if (lower.includes(known) && known.length >= term.length - 1) return true;
+  }
+  return false;
+}
+
+
 function looksLikeJunk(term) {
   const chars = [...term];
   if (chars.length > 2) {
@@ -526,6 +585,23 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
     process.exit(0);
   }
 
+  // 撤销"最近一次学到的词" —— 用户看到浮窗提示后反悔，或者点菜单。
+  // 读上一段写的那份日志，把词和对子一起撤掉。
+  if (argv.includes('--undo-last')) {
+    const journalPath = value('--journal')
+      || path.join(os.homedir(), '.voice-global', 'last-learned.json');
+    const dictForUndo = value('--dict') || path.join(os.homedir(), '.voice-global', 'dictionary.json');
+    const pairsForUndo = value('--replacements')
+      || path.join(os.homedir(), '.voice-global', 'replacements.json');
+    let journal = null;
+    try { journal = JSON.parse(fs.readFileSync(journalPath, 'utf8')); } catch { /* 没有就没什么可撤 */ }
+    const gone = journal?.added?.length ? removeTerms(dictForUndo, journal.added).removed : [];
+    const gonePairs = journal?.pairs?.length ? removeReplacements(pairsForUndo, journal.pairs) : [];
+    try { fs.unlinkSync(journalPath); } catch { /* 已经没了 */ }
+    process.stdout.write(`${JSON.stringify({ removed: gone, pairs: gonePairs })}\n`);
+    process.exit(0);
+  }
+
   const pendingPath = value('--pending')
     || path.join(os.homedir(), '.voice-global', 'learning-pending.json');
   // 纠正对子（原文的误听 → 用户改成的东西）。见 dictionary.mjs 的 applyReplacements。
@@ -536,6 +612,19 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
     process.stdout.write(`${JSON.stringify({ added: [], pending: [], candidates })}\n`);
   } else {
     const { added, pending, promoted, rejected, pairs: pairsOut } = learn(dictPath, pendingPath, candidates, loadAccepted(), { replacementsPath });
+    // **记一份"最近一次学了什么"**，给「撤销上一次学到的词」用。
+    //
+    // 为什么不把这个信息通过 Swift 的通道传上去：撤销是低频动作，
+    // 而通道每加一个字段就要改四处（sidecar → Sidecar.swift → 回调 → 菜单）。
+    // 落一份小文件反而更简单，而且重启之后还能撤销。
+    const journalPath = value('--journal')
+      || path.join(os.homedir(), '.voice-global', 'last-learned.json');
+    try {
+      fs.writeFileSync(journalPath, JSON.stringify({
+        at: new Date().toISOString(),
+        added, pairs: pairsOut ?? [], pending,
+      }, null, 2));
+    } catch { /* 写不了不影响学习本身 */ }
     process.stdout.write(`${JSON.stringify({ added, pending, promoted, rejected, candidates, pairs: pairsOut })}\n`);
   }
 }

@@ -194,6 +194,39 @@ console.log('\n— 识别错误 vs 改主意 —');
 }
 
 
+
+// ── 通用公开术语：机器本来就会写对，学它只是噪音 ──────────────────
+// 对照 VoiceInk 的 Auto Learn 策略（Apple / Google / Xcode / Markdown / React /
+// PostgreSQL / GitHub 都被排除，原文是这些"不是可复用的语音纠正"）。
+console.log('\n— 通用术语不学 —');
+{
+  const shouldSkip = [
+    ['我用一下github看看', '我用一下Github看看', 'GitHub'],
+    ['你打开xcode', '你打开Xcode', 'Xcode'],
+    ['我们用markdown写', '我们用Markdown写', 'Markdown'],
+    ['用微信发我', '用微信发我吧', '微信'],
+    ['部署到docker上', '部署到Docker上', 'Docker'],
+  ];
+  for (const [raw, corr, label] of shouldSkip) {
+    const terms = extractTerms(raw, corr).map((c) => c.term);
+    const ok = terms.length === 0;
+    if (!ok) failures += 1;
+    console.log(`${ok ? 'PASS' : 'FAIL'}  ${label} 不该自动学 → ${terms.join('、') || '（正确地没学）'}`);
+  }
+  // 反过来：专有名词仍然要学 —— 不能因为加了过滤就把该学的也挡掉
+  const mine = [
+    ['按照最佳时间部署服务', '按照最佳实践部署服务', '最佳实践部署'],
+    ['你看看用户测自净化', '你看看用户侧自进化', '用户侧自进化'],
+  ];
+  for (const [raw, corr, label] of mine) {
+    const terms = extractTerms(raw, corr).map((c) => c.term);
+    const ok = terms.length > 0;
+    if (!ok) failures += 1;
+    console.log(`${ok ? 'PASS' : 'FAIL'}  专有名词 ${label} 仍要学 → ${terms.join('、') || '（没学到！）'}`);
+  }
+}
+
+
 if (failures === 0) {
   console.log('ALL PASS');
   process.exit(0);

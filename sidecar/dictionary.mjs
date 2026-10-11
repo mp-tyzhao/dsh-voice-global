@@ -347,3 +347,27 @@ export function applyReplacements(text, pairs) {
   }
   return { text: out, applied };
 }
+
+/**
+ * 按 for/to 删掉对子（撤销用）。
+ * @param {string} path
+ * @param {Array<{from: string, to: string}>} pairs
+ * @returns {string[]} 实际删掉的 from
+ */
+export function removeReplacements(path, pairs) {
+  let document = { pairs: {} };
+  try { document = JSON.parse(fs.readFileSync(path, 'utf8')); } catch { return []; }
+  const all = (document && typeof document.pairs === 'object' && document.pairs) || {};
+  const removed = [];
+  for (const pair of pairs ?? []) {
+    const key = String(pair?.from ?? '');
+    if (key && all[key] && all[key].to === pair.to) {
+      delete all[key];
+      removed.push(key);
+    }
+  }
+  if (removed.length) {
+    try { fs.writeFileSync(path, JSON.stringify({ pairs: all }, null, 2)); } catch { /* 忽略 */ }
+  }
+  return removed;
+}
