@@ -206,16 +206,23 @@ final class EditWatcher {
             stop()
             return
         }
-        guard let current = EditWatcher.focusedElement() else {
-            finish("拿不到焦点元素")
+        // **必须走和 settle 同一条读取链。**
+        //
+        // 踩过的坑（2026-10-11）：这里原来直接调 focusedElement() + value(of:)，
+        // 也就是只走第一级。两个后果：
+        //   · Electron 系（飞书/Edge/DSH）第一级读不到 → 观测 1 秒后就结束，
+        //     用户的修改永远抓不到
+        //   · 更要命的是：readFocusedText() 里有 beginRead() 在重置
+        //     "本次读取的时间预算"，这里不重置的话，那一刻距上次早已超过 0.4 秒
+        //     → spendAXCall() 直接返回 false → **每一次属性读取都被预算挡掉**，
+        //     于是所有 App 的观测全都在 1 秒后无声结束
+        // 观测启动时读到了、1 秒后读不到，就是这两个原因叠加。
+        guard let read = EditWatcher.readFocusedText() else {
+            finish("读了三级都拿不到文本")
             stop()
             return
         }
-        guard let now = EditWatcher.value(of: current) else {
-            finish("焦点元素不提供文本")
-            stop()
-            return
-        }
+        let now = read.text
         guard now != before else {
             trace("内容未变（\(now.count) 字）")
             return
@@ -572,9 +579,25 @@ final class EditWatcher {
         axCallsThisRead = 0
     }
 
+    /// 上一次因为"超出预算"而放弃读取的日志时刻（限流用）。
+    private static var lastBudgetLogAt = Date.distantPast
+
     /// 记一次调用并判断是否还有预算（次数与时间双闸）。
     private static func spendAXCall() -> Bool {
-        guard Date().timeIntervalSince(readStartedAt) < readBudgetSeconds else { return false }
+        guard Date().timeIntervalSince(readStartedAt) < readBudgetSeconds else {
+            // **预算挡掉读取时一定要出声。**
+            //
+            // 踩过的坑（2026-10-11）：poll() 漏了调用 beginRead()，于是
+            // "距上次开始读取"早已超过 0.4 秒 → 每一次属性读取都被预算挡掉 →
+            // 所有 App 的观测全都在 1 秒后无声结束，日志里只有一句
+            // "焦点元素不提供文本"，完全看不出是预算的问题。
+            // 这类"漏掉一条路径"的 bug 我今天犯了三次，所以让失败可见。
+            if Date().timeIntervalSince(lastBudgetLogAt) > 2 {
+                lastBudgetLogAt = Date()
+                Log.shared.info("学习：AX 读取超出 \(readBudgetSeconds) 秒预算，已放弃（对端无响应，或调用方漏了 beginRead）")
+            }
+            return false
+        }
         axCallsThisRead += 1
         return axCallsThisRead <= maxAXCallsPerRead
     }

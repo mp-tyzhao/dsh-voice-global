@@ -786,6 +786,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 三级都失败：把这一级的实际样子记下来，便于判断对方
         // 是「根本没暴露」还是「暴露在别的属性上」
+        EditWatcher.beginRead()   // 诊断自己读属性，也要重置预算
         if let element = EditWatcher.focusedElement() {
             let role = EditWatcher.stringAttribute(element, kAXRoleAttribute) ?? "?"
             let subrole = EditWatcher.stringAttribute(element, kAXSubroleAttribute) ?? "?"
