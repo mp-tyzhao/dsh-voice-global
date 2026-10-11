@@ -117,6 +117,32 @@ else
   warn "  node bench/regression.mjs --cleanup rules --save bench/baseline-rules.json"
 fi
 
+# ── 4.8 仓库里不该有大块无关文件 ────────────────────────────────────────────
+#
+# 有一次把一份 3MB 的调研 PDF（连同它的空提取结果）提交了进来 ——
+# 它成了仓库里最大的文件，.git 一共 5.6MB，它占 2.96MB，
+# 而没有任何代码引用它。发布前拦一道，避免再次静默发出去。
+#
+# 白名单是"确实需要进仓库的大文件"。目前只有回归基线（110KB 左右），
+# 阈值放到 1MB 是为了留足余量、不误伤将来的正常增长。
+BIG=""
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  SIZE="${line%% *}"
+  FILE="${line#* }"
+  case "$FILE" in
+    bench/baseline-rules.json) continue ;;
+  esac
+  BIG="${BIG}\n    ${FILE}（$(echo "$SIZE" | awk '{printf "%.1f", $1/1048576}')MB）"
+done < <(git ls-files -z | xargs -0 stat -f "%z %N" 2>/dev/null | awk '$1 > 1048576')
+
+if [ -n "$BIG" ]; then
+  warn "$(printf "仓库里有超过 1MB 的非白名单文件：%b" "$BIG")"
+  warn "确认它们确实该进仓库；不该就 git rm 掉。"
+  die "仓库里有可疑的大文件"
+fi
+ok "仓库里没有异常的大文件"
+
 # ── 5. 评测没退化 ──────────────────────────────────────────────────────────
 if [ -f bench/labels.jsonl ]; then
   COUNT=$(grep -c . bench/labels.jsonl || echo 0)
