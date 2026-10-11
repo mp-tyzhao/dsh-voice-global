@@ -21,6 +21,35 @@ final class HUD {
     private var pendingFlash: (title: String, detail: String, seconds: Double)?
     /// 最近一次收到电平的时刻。
     private var lastLevelAt = Date.distantPast
+    /// 最近一次向窗口服务器核实"真的在屏上"的时刻。
+    private var lastVerifiedAt = Date.distantPast
+
+    /// 从**窗口服务器**确认浮窗真的被合成到了屏幕上。
+    ///
+    /// 为什么不能用 `panel.isVisible`：它只表示"被 orderFront 过"。
+    /// 实测（2026-10-11）：窗口处于 `isVisible == true` 但系统**完全没有合成它**
+    /// 的状态 —— 一整天 1164 条日志都写着"可见=true"，而用户什么都看不到，
+    /// 连"已输入/没听清"这些提示也一起消失了。重启 App 才恢复。
+    ///
+    /// 更糟的是我原来的自愈逻辑正是拿 `isVisible` 当判据，所以它永远不触发。
+    /// `CGWindowListCopyWindowInfo` 反映的是真实的合成结果，用它才对。
+    private func isCompositedOnScreen() -> Bool {
+        guard let panel, panel.windowNumber > 0 else { return false }
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        return list.contains { ($0[kCGWindowNumber as String] as? Int) == panel.windowNumber }
+    }
+
+    /// 面板卡住时重建它。
+    /// 只 orderOut/orderFront 是救不回来的（实测），必须换一个新窗口。
+    private func rebuildPanel() {
+        panel?.orderOut(nil)
+        cancelPendingHide()
+        panel = nil
+        titleLabel = nil
+        detailLabel = nil
+        levelBar = nil
+        show(title: recordingTitle, detail: recordingDetail, recording: isRecording)
+    }
 
     /// **是不是真的还在录音。**
     ///
@@ -125,6 +154,17 @@ final class HUD {
             levelBar?.isHidden = false
             Log.shared.info("浮窗：录音状态被顶掉了，已恢复")
         }
+        // 每秒向窗口服务器核实一次：**真的画出来了吗**。
+        // 这条才是有效的自愈 —— 窗口被系统放逐时 isVisible 依然是 true。
+        if Date().timeIntervalSince(lastVerifiedAt) > 1.0 {
+            lastVerifiedAt = Date()
+            if !isCompositedOnScreen() {
+                Log.shared.error("浮窗：系统没有合成它（isVisible=\(panel.isVisible)），重建面板")
+                rebuildPanel()
+                return
+            }
+        }
+
         guard !panel.isVisible else { return }
         panel.alphaValue = 1
         panel.orderFrontRegardless()
@@ -175,7 +215,11 @@ final class HUD {
         panel.hasShadow = true
         panel.ignoresMouseEvents = true
         panel.hidesOnDeactivate = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        // 注意：**不要**加 .stationary。
+        // 它的含义是"不跟随桌面切换"，和 .canJoinAllSpaces（出现在所有桌面）
+        // 语义冲突。实测（2026-10-11）浮窗会卡在"已 orderFront 但系统不合成"
+        // 的状态，怀疑与此有关 —— 去掉它，只保留"所有桌面可见 + 全屏时也在"。
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
 
         let effect = NSVisualEffectView(frame: panel.contentView!.bounds)
         effect.autoresizingMask = [.width, .height]
